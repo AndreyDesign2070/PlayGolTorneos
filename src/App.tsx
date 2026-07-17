@@ -44,6 +44,8 @@ export interface Tournament {
   faseFinalType?: 'octavos' | 'cuartos' | 'semis'; // For FASE_FINAL
   teams: TournamentTeam[];
   logoUrl?: string; // Base64 uploaded custom image
+  adminPassword?: string;
+  visitorPassword?: string;
 }
 
 export interface Match {
@@ -57,6 +59,7 @@ export interface Match {
   group?: string; // For GRUPOS
   round: string; // e.g., "Jornada 1", "Octavos", "Cuartos", "Semifinal", "Final"
   bracketSlot?: number; // Slot for brackets
+  isLlave?: boolean;
 }
 
 export interface StandingRow {
@@ -99,7 +102,7 @@ function cleanForFirestore(obj: any): any {
 export default function App() {
   // --- STATE ---
   const [role, setRole] = useState<'admin' | 'visitor' | null>(() => {
-    return (localStorage.getItem('playgol_role') as any) || null;
+    return (sessionStorage.getItem('playgol_role') as any) || null;
   });
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -113,6 +116,31 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'tournaments' | 'teams' | 'share'>('tournaments');
   const [selectedTournamentId, setSelectedTournamentId] = useState<string | null>(null);
   const [tournamentSubTab, setTournamentSubTab] = useState<'table' | 'matches' | 'bracket' | 'keys'>('matches');
+
+  // Tournament session access mapping (stores whether this tab has unlocked 'AdminTorneo' or 'Visitante' for a tournament)
+  const [unlockedTournaments, setUnlockedTournaments] = useState<Record<string, 'AdminTorneo' | 'Visitante'>>(() => {
+    try {
+      const saved = sessionStorage.getItem('playgol_unlocked_tournaments');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const setTournamentAccess = (tourId: string, accessRole: 'AdminTorneo' | 'Visitante') => {
+    setUnlockedTournaments(prev => {
+      const updated = { ...prev, [tourId]: accessRole };
+      sessionStorage.setItem('playgol_unlocked_tournaments', JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  // Tournament-specific password verification state
+  const [passwordCheckingTourId, setPasswordCheckingTourId] = useState<string | null>(null);
+  const [tourPasswordValue, setTourPasswordValue] = useState('');
+  const [tourPasswordError, setTourPasswordError] = useState('');
+  const [showTourPassword, setShowTourPassword] = useState(false);
+  const [creatingMatchInLlaves, setCreatingMatchInLlaves] = useState(false);
 
   // Creation Modals / Forms
   const [showTeamModal, setShowTeamModal] = useState(false);
@@ -131,7 +159,9 @@ export default function App() {
     numGroups: 2,
     numTeams: 8,
     faseFinalType: 'semis' as 'octavos' | 'cuartos' | 'semis',
-    logoUrl: ''
+    logoUrl: '',
+    adminPassword: '',
+    visitorPassword: ''
   });
 
   // Edit Modals / States
@@ -191,6 +221,17 @@ export default function App() {
     onConfirm: () => void;
   } | null>(null);
 
+  // Manual Llaves / Brackets creation state
+  const [showAddManualLlaveModal, setShowAddManualLlaveModal] = useState(false);
+  const [manualLlaveState, setManualLlaveState] = useState({
+    phaseName: 'Segunda Fase',
+    teamAId: '',
+    teamBId: '',
+    scoreA: '',
+    scoreB: '',
+    played: false
+  });
+
   const showConfirm = (
     title: string,
     message: string,
@@ -228,10 +269,10 @@ export default function App() {
       if (user) {
         if (user.email === 'admin@playgol.com') {
           setRole('admin');
-          localStorage.setItem('playgol_role', 'admin');
+          sessionStorage.setItem('playgol_role', 'admin');
         } else if (user.email === 'visitor@playgol.com') {
           setRole('visitor');
-          localStorage.setItem('playgol_role', 'visitor');
+          sessionStorage.setItem('playgol_role', 'visitor');
         }
       }
     });
@@ -392,8 +433,9 @@ export default function App() {
     localStorage.setItem('playgol_tournaments', JSON.stringify(cleanTournaments));
     localStorage.setItem('playgol_matches', JSON.stringify(cleanMatches));
 
-    // Exclusive real-time update of Firestore on admin side
-    if (role === 'admin') {
+    // Exclusive real-time update of Firestore and Express on authorized editor sides
+    const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
+    if (isAuthorizedEditor) {
       try {
         // Compare with current local states to perform targeted Firestore updates (diffing)
         
@@ -438,6 +480,17 @@ export default function App() {
       } catch (err) {
         console.error("Error writing updates to Firebase Firestore:", err);
       }
+
+      // Sync with Express backend to keep data.json always updated on the container
+      try {
+        await fetch('/api/state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ teams: cleanTeams, tournaments: cleanTournaments, matches: cleanMatches })
+        });
+      } catch (apiErr) {
+        console.error("Error syncing state to Express server:", apiErr);
+      }
     }
   };
 
@@ -462,10 +515,14 @@ export default function App() {
       return;
     }
 
-    // Set local state and local storage immediately so login is guaranteed to succeed and show the app instantly!
+    // Set local state and session storage immediately so login is guaranteed to succeed and show the app instantly!
     setRole(targetRole);
-    localStorage.setItem('playgol_role', targetRole);
+    sessionStorage.setItem('playgol_role', targetRole);
     setLoginError('');
+
+    // Always redirect to tournament list view upon login
+    setActiveTab('tournaments');
+    setSelectedTournamentId(null);
 
     try {
       // Background attempt to sign in to Firebase Auth
@@ -488,8 +545,12 @@ export default function App() {
     try {
       await signOut(auth);
       setRole(null);
-      localStorage.removeItem('playgol_role');
+      sessionStorage.removeItem('playgol_role');
+      sessionStorage.removeItem('playgol_unlocked_tournaments');
+      setUnlockedTournaments({});
       setPassword('');
+      setSelectedTournamentId(null);
+      setActiveTab('tournaments');
     } catch (err) {
       console.error("Error signing out from Firebase Auth:", err);
     }
@@ -834,12 +895,14 @@ export default function App() {
       numTeams: (newTournament.type === 'LIGA' || newTournament.type === 'ELIMINACION_DIRECTA') ? Number(newTournament.numTeams) : undefined,
       faseFinalType: newTournament.type === 'FASE_FINAL' ? newTournament.faseFinalType : undefined,
       teams: [],
-      logoUrl: newTournament.logoUrl || undefined
+      logoUrl: newTournament.logoUrl || undefined,
+      adminPassword: newTournament.adminPassword.trim() || undefined,
+      visitorPassword: newTournament.visitorPassword.trim() || undefined
     };
 
     saveState(teams, [...tournaments, created], matches);
     setSelectedTournamentId(created.id);
-    setNewTournament({ name: '', type: 'LIGA', numGroups: 2, numTeams: 8, faseFinalType: 'semis', logoUrl: '' });
+    setNewTournament({ name: '', type: 'LIGA', numGroups: 2, numTeams: 8, faseFinalType: 'semis', logoUrl: '', adminPassword: '', visitorPassword: '' });
     setShowTournamentModal(false);
     setTournamentSubTab('matches');
   };
@@ -860,6 +923,104 @@ export default function App() {
         saveState(teams, updatedTours, updatedMatches);
       }
     );
+  };
+
+  // --- TOURNAMENT PASSWORD ACCESS SYSTEM ---
+  const handleSelectTournament = (tour: Tournament) => {
+    // If general admin, bypass password check and give full admin privileges
+    if (role === 'admin') {
+      setSelectedTournamentId(tour.id);
+      setTournamentSubTab('matches');
+      return;
+    }
+
+    // If the tournament has no passwords set, anyone can view it as public visitor
+    const hasAdminPass = !!tour.adminPassword;
+    const hasVisitorPass = !!tour.visitorPassword;
+    if (!hasAdminPass && !hasVisitorPass) {
+      // Free public access
+      setTournamentAccess(tour.id, 'Visitante');
+      setSelectedTournamentId(tour.id);
+      setTournamentSubTab('matches');
+      return;
+    }
+
+    // If already unlocked in this session, enter directly
+    if (unlockedTournaments[tour.id]) {
+      setSelectedTournamentId(tour.id);
+      setTournamentSubTab('matches');
+      return;
+    }
+
+    // Otherwise, prompt for the tournament password
+    setPasswordCheckingTourId(tour.id);
+    setTourPasswordValue('');
+    setTourPasswordError('');
+    setShowTourPassword(false);
+  };
+
+  const handleVerifyTournamentPassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passwordCheckingTourId) return;
+
+    const tour = tournaments.find(t => t.id === passwordCheckingTourId);
+    if (!tour) return;
+
+    const inputPass = tourPasswordValue.trim();
+    const adminPass = tour.adminPassword?.trim();
+    const visitorPass = tour.visitorPassword?.trim();
+
+    // Check matches
+    if (adminPass && inputPass === adminPass) {
+      setTournamentAccess(tour.id, 'AdminTorneo');
+      setSelectedTournamentId(tour.id);
+      setPasswordCheckingTourId(null);
+      setTournamentSubTab('matches');
+    } else if (visitorPass && inputPass === visitorPass) {
+      setTournamentAccess(tour.id, 'Visitante');
+      setSelectedTournamentId(tour.id);
+      setPasswordCheckingTourId(null);
+      setTournamentSubTab('matches');
+    } else {
+      setTourPasswordError('Contraseña de torneo incorrecta.');
+    }
+  };
+
+  // --- MANUAL LLAVE CREATION ---
+  const handleCreateManualLlave = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedTournamentId || !manualLlaveState.teamAId || !manualLlaveState.teamBId) {
+      alert('Por favor selecciona ambos equipos.');
+      return;
+    }
+    if (manualLlaveState.teamAId === manualLlaveState.teamBId) {
+      alert('El equipo local y visitante no pueden ser el mismo.');
+      return;
+    }
+
+    const hasScores = manualLlaveState.scoreA !== '' && manualLlaveState.scoreB !== '';
+    const created: Match = {
+      id: `match-${Date.now()}`,
+      tournamentId: selectedTournamentId,
+      teamAId: manualLlaveState.teamAId,
+      teamBId: manualLlaveState.teamBId,
+      scoreA: hasScores ? Number(manualLlaveState.scoreA) : null,
+      scoreB: hasScores ? Number(manualLlaveState.scoreB) : null,
+      played: hasScores,
+      round: manualLlaveState.phaseName.trim() || 'Segunda Fase',
+      isLlave: true
+    };
+
+    saveState(teams, tournaments, [...matches, created]);
+    setShowAddManualLlaveModal(false);
+    setManualLlaveState({
+      phaseName: 'Segunda Fase',
+      teamAId: '',
+      teamBId: '',
+      scoreA: '',
+      scoreB: '',
+      played: false
+    });
   };
 
   // --- ASSIGN TEAM TO TOURNAMENT ---
@@ -1429,8 +1590,10 @@ export default function App() {
     );
   }
 
-  // --- SELECTED TOURNAMENT INSTANCE ---
+  // --- SELECTED TOURNAMENT INSTANCE & ROLE CONTROLS ---
   const currentTour = tournaments.find(t => t.id === selectedTournamentId);
+  const currentTourRole = selectedTournamentId ? unlockedTournaments[selectedTournamentId] : null;
+  const canEditCurrentTour = role === 'admin' || currentTourRole === 'AdminTorneo';
 
   // --- MAIN APP APPLICATION SHELL ---
   return (
@@ -1560,18 +1723,16 @@ export default function App() {
                   Tabla de Posiciones
                 </button>
               )}
-              {currentTour.name === 'INTERLIGA CANTONAL PORTOVIEJO 2026' && (
-                <button
-                  onClick={() => setTournamentSubTab('keys')}
-                  className={`px-4 py-2.5 text-sm font-bold border-b-2 transition ${
-                    tournamentSubTab === 'keys' 
-                      ? 'border-emerald-500 text-white' 
-                      : 'border-transparent text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  LLAVES
-                </button>
-              )}
+              <button
+                onClick={() => setTournamentSubTab('keys')}
+                className={`px-4 py-2.5 text-sm font-bold border-b-2 transition ${
+                  tournamentSubTab === 'keys' 
+                    ? 'border-emerald-500 text-white' 
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                LLAVES
+              </button>
               {(currentTour.type === 'ELIMINACION_DIRECTA' || currentTour.type === 'FASE_FINAL') && (
                 <button
                   onClick={() => setTournamentSubTab('bracket')}
@@ -1660,126 +1821,280 @@ export default function App() {
               </div>
             )}
 
-            {/* SUB-VIEW: LLAVES (INTERLIGA CANTONAL PORTOVIEJO 2026) */}
-            {tournamentSubTab === 'keys' && currentTour.name === 'INTERLIGA CANTONAL PORTOVIEJO 2026' && (
+            {/* SUB-VIEW: LLAVES */}
+            {tournamentSubTab === 'keys' && (
               <div className="space-y-6">
-                <div className="bg-gradient-to-r from-emerald-950/40 via-slate-900/40 to-emerald-950/40 border border-emerald-900/30 p-5 rounded-3xl text-center">
-                  <div className="flex items-center justify-center gap-2 mb-1.5">
-                    <Trophy className="w-5 h-5 text-emerald-400" />
-                    <h3 className="text-base font-extrabold text-white uppercase tracking-wider">
-                      Emparejamientos de Llaves (Octavos de Final)
-                    </h3>
-                  </div>
-                  <p className="text-xs text-slate-400 max-w-xl mx-auto leading-relaxed">
-                    Las llaves se definen dinámicamente según el orden final de los grupos (A, B, C, D, E) y el mejor 4to lugar de todos los grupos. {role === 'admin' && 'Como administrador, puedes editar marcadores y sobrescribir cruces manualmente.'}
-                  </p>
-                </div>
+                {currentTour.name === 'INTERLIGA CANTONAL PORTOVIEJO 2026' ? (
+                  <>
+                    <div className="bg-gradient-to-r from-emerald-950/40 via-slate-900/40 to-emerald-950/40 border border-emerald-900/30 p-5 rounded-3xl text-center">
+                      <div className="flex items-center justify-center gap-2 mb-1.5">
+                        <Trophy className="w-5 h-5 text-emerald-400" />
+                        <h3 className="text-base font-extrabold text-white uppercase tracking-wider">
+                          Emparejamientos de Llaves (Octavos de Final)
+                        </h3>
+                      </div>
+                      <p className="text-xs text-slate-400 max-w-xl mx-auto leading-relaxed">
+                        Las llaves se definen dinámicamente según el orden final de los grupos (A, B, C, D, E) y el mejor 4to lugar de todos los grupos. {role === 'admin' && 'Como administrador, puedes editar marcadores y sobrescribir cruces manualmente.'}
+                      </p>
+                    </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {Array.from({ length: 8 }, (_, i) => {
-                    const match = getLlaveMatch(currentTour.id, i);
-                    const defaultTeams = getLlavesDefaultTeams(currentTour.id)[i];
-                    const teamA = teams.find(t => t.id === match.teamAId);
-                    const teamB = teams.find(t => t.id === match.teamBId);
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {Array.from({ length: 8 }, (_, i) => {
+                        const match = getLlaveMatch(currentTour.id, i);
+                        const defaultTeams = getLlavesDefaultTeams(currentTour.id)[i];
+                        const teamA = teams.find(t => t.id === match.teamAId);
+                        const teamB = teams.find(t => t.id === match.teamBId);
 
-                    return (
-                      <div 
-                        key={match.id}
-                        onClick={() => {
-                          if (role === 'admin') {
-                            handleOpenScoreModal(match);
-                          }
-                        }}
-                        className={`p-4 bg-slate-900 rounded-2xl border ${
-                          match.played ? 'border-emerald-500/30 bg-emerald-950/5' : 'border-slate-800'
-                        } hover:border-emerald-500/50 transition relative overflow-hidden flex flex-col justify-between ${
-                          role === 'admin' ? 'cursor-pointer' : ''
-                        }`}
-                      >
-                        {/* Match Title / Descriptor Header */}
-                        <div className="flex items-center justify-between border-b border-slate-800/80 pb-2 mb-3">
-                          <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest bg-emerald-950/60 border border-emerald-900/30 px-2 py-0.5 rounded-md">
-                            Llave {i + 1}
-                          </span>
-                          <span className="text-[10px] font-medium text-slate-400 flex items-center gap-1">
-                            {defaultTeams.desc}
-                            {match.overrideTeams && (
-                              <span className="text-[9px] font-bold text-amber-400 bg-amber-950/40 border border-amber-900/30 px-1 py-0.2 rounded">
-                                Manual
+                        return (
+                          <div 
+                            key={match.id}
+                            onClick={() => {
+                              if (role === 'admin') {
+                                handleOpenScoreModal(match);
+                              }
+                            }}
+                            className={`p-4 bg-slate-900 rounded-2xl border ${
+                              match.played ? 'border-emerald-500/30 bg-emerald-950/5' : 'border-slate-800'
+                            } hover:border-emerald-500/50 transition relative overflow-hidden flex flex-col justify-between ${
+                              role === 'admin' ? 'cursor-pointer' : ''
+                            }`}
+                          >
+                            <div className="flex items-center justify-between border-b border-slate-800/80 pb-2 mb-3">
+                              <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest bg-emerald-950/60 border border-emerald-900/30 px-2 py-0.5 rounded-md">
+                                Llave {i + 1}
                               </span>
-                            )}
-                          </span>
-                        </div>
-
-                        {/* Matchup core body */}
-                        <div className="flex items-center justify-between">
-                          {/* Team A */}
-                          <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                            {teamA ? renderTeamBadge(teamA, 'w-8 h-8') : (
-                              <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
-                                <span className="text-[9px] font-bold text-slate-500">TBD</span>
-                              </div>
-                            )}
-                            <div className="min-w-0">
-                              <span className={`text-xs font-extrabold truncate block ${
-                                match.played && (match.scoreA ?? 0) > (match.scoreB ?? 0) ? 'text-white' : 'text-slate-300'
-                              }`}>
-                                {teamA ? teamA.name : 'Por clasificar'}
+                              <span className="text-[10px] font-medium text-slate-400 flex items-center gap-1">
+                                {defaultTeams.desc}
+                                {match.overrideTeams && (
+                                  <span className="text-[9px] font-bold text-amber-400 bg-amber-950/40 border border-amber-900/30 px-1 py-0.2 rounded">
+                                    Manual
+                                  </span>
+                                )}
                               </span>
-                              <span className="text-[9px] text-slate-500 block">Local</span>
                             </div>
-                          </div>
 
-                          {/* Score / Center connector */}
-                          <div className="flex flex-col items-center gap-1 mx-3 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850">
-                            {match.played ? (
-                              <div className="flex items-center gap-2">
-                                <span className="text-base font-black text-white">{match.scoreA}</span>
-                                <span className="text-slate-600 font-bold text-xs">-</span>
-                                <span className="text-base font-black text-white">{match.scoreB}</span>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                                {teamA ? renderTeamBadge(teamA, 'w-8 h-8') : (
+                                  <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                                    <span className="text-[9px] font-bold text-slate-500">TBD</span>
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <span className={`text-xs font-extrabold truncate block ${
+                                    match.played && (match.scoreA ?? 0) > (match.scoreB ?? 0) ? 'text-white' : 'text-slate-300'
+                                  }`}>
+                                    {teamA ? teamA.name : 'Por clasificar'}
+                                  </span>
+                                  <span className="text-[9px] text-slate-500 block">Local</span>
+                                </div>
                               </div>
-                            ) : (
-                              <span className="text-[9px] font-black text-slate-500 uppercase tracking-wider">VS</span>
-                            )}
-                          </div>
 
-                          {/* Team B */}
-                          <div className="flex items-center gap-2.5 flex-1 justify-end min-w-0 text-right">
-                            <div className="min-w-0">
-                              <span className={`text-xs font-extrabold truncate block ${
-                                match.played && (match.scoreB ?? 0) > (match.scoreA ?? 0) ? 'text-white' : 'text-slate-300'
-                              }`}>
-                                {teamB ? teamB.name : 'Por clasificar'}
-                              </span>
-                              <span className="text-[9px] text-slate-500 block">Visitante</span>
+                              <div className="flex flex-col items-center gap-1 mx-3 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850">
+                                {match.played ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-base font-black text-white">{match.scoreA}</span>
+                                    <span className="text-slate-600 font-bold text-xs">-</span>
+                                    <span className="text-base font-black text-white">{match.scoreB}</span>
+                                  </div>
+                                ) : (
+                                  <span className="text-[9px] font-black text-slate-500 uppercase tracking-wider">VS</span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-2.5 flex-1 justify-end min-w-0 text-right">
+                                <div className="min-w-0">
+                                  <span className={`text-xs font-extrabold truncate block ${
+                                    match.played && (match.scoreB ?? 0) > (match.scoreA ?? 0) ? 'text-white' : 'text-slate-300'
+                                  }`}>
+                                    {teamB ? teamB.name : 'Por clasificar'}
+                                  </span>
+                                  <span className="text-[9px] text-slate-500 block">Visitante</span>
+                                </div>
+                                {teamB ? renderTeamBadge(teamB, 'w-8 h-8') : (
+                                  <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                                    <span className="text-[9px] font-bold text-slate-500">TBD</span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
-                            {teamB ? renderTeamBadge(teamB, 'w-8 h-8') : (
-                              <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
-                                <span className="text-[9px] font-bold text-slate-500">TBD</span>
+
+                            {role === 'admin' && (
+                              <div className="flex items-center justify-end gap-1.5 mt-3 pt-2 border-t border-slate-800/50">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleOpenEditMatchDetails(match);
+                                  }}
+                                  className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 px-2.5 py-1 bg-emerald-950/40 border border-emerald-900/30 rounded-lg transition flex items-center gap-1"
+                                >
+                                  <Edit2 className="w-3 h-3" /> Editar Cruce / Marcador
+                                </button>
                               </div>
                             )}
                           </div>
-                        </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : (
+                  // Manual LLAVES configuration for other tournaments
+                  <div className="space-y-6">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="text-lg font-bold text-white">Fases de Eliminación Directa</h3>
+                        <p className="text-xs text-slate-400">Crea y gestiona las fases finales de forma personalizada.</p>
+                      </div>
+                      {canEditCurrentTour && (
+                        <button
+                          onClick={() => {
+                            setManualLlaveState({
+                              phaseName: 'Segunda Fase',
+                              teamAId: '',
+                              teamBId: '',
+                              scoreA: '',
+                              scoreB: '',
+                              played: false
+                            });
+                            setShowAddManualLlaveModal(true);
+                          }}
+                          className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1 transition shadow cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> Agregar Llave / Partido
+                        </button>
+                      )}
+                    </div>
 
-                        {/* Admin Action Bar if admin is viewing */}
-                        {role === 'admin' && (
-                          <div className="flex items-center justify-end gap-1.5 mt-3 pt-2 border-t border-slate-800/50">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleOpenEditMatchDetails(match);
-                              }}
-                              className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 px-2.5 py-1 bg-emerald-950/40 border border-emerald-900/30 rounded-lg transition flex items-center gap-1"
-                            >
-                              <Edit2 className="w-3 h-3" /> Editar Cruce / Marcador
-                            </button>
-                          </div>
+                    {matches.filter(m => m.tournamentId === currentTour.id && m.isLlave === true).length === 0 ? (
+                      <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl text-center">
+                        <p className="text-slate-400 text-sm">Aún no se han configurado llaves manuales para este torneo.</p>
+                        {canEditCurrentTour && (
+                          <button
+                            onClick={() => {
+                              setManualLlaveState({
+                                phaseName: 'Segunda Fase',
+                                teamAId: '',
+                                teamBId: '',
+                                scoreA: '',
+                                scoreB: '',
+                                played: false
+                              });
+                              setShowAddManualLlaveModal(true);
+                            }}
+                            className="mt-4 bg-emerald-600 text-white text-xs font-bold px-4 py-2 rounded-xl transition cursor-pointer"
+                          >
+                            Crear Primera Llave
+                          </button>
                         )}
                       </div>
-                    );
-                  })}
-                </div>
+                    ) : (
+                      <div className="space-y-8">
+                        {(Object.entries(
+                          matches
+                            .filter(m => m.tournamentId === currentTour.id && m.isLlave === true)
+                            .reduce((acc, m) => {
+                              if (!acc[m.round]) acc[m.round] = [];
+                              acc[m.round].push(m);
+                              return acc;
+                            }, {} as Record<string, Match[]>)
+                        ) as [string, Match[]][]).map(([phase, phaseMatches]) => (
+                          <div key={phase} className="space-y-4">
+                            <h4 className="text-sm font-extrabold text-emerald-400 uppercase tracking-wider border-b border-slate-800/80 pb-1.5 flex items-center gap-2">
+                              🏆 {phase}
+                            </h4>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              {phaseMatches.map(match => {
+                                const teamA = teams.find(t => t.id === match.teamAId);
+                                const teamB = teams.find(t => t.id === match.teamBId);
+
+                                return (
+                                  <div
+                                    key={match.id}
+                                    onClick={() => {
+                                      if (canEditCurrentTour) {
+                                        handleOpenEditMatchDetails(match);
+                                      }
+                                    }}
+                                    className={`p-4 bg-slate-900 border rounded-2xl transition ${
+                                      match.played ? 'border-emerald-500/30 bg-emerald-950/5' : 'border-slate-800'
+                                    } ${canEditCurrentTour ? 'hover:border-emerald-500/50 cursor-pointer' : ''}`}
+                                  >
+                                    <div className="flex items-center justify-between">
+                                      {/* Team A */}
+                                      <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                                        {teamA ? renderTeamBadge(teamA, 'w-8 h-8') : (
+                                          <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                                            <span className="text-[10px] font-bold text-slate-500">TBD</span>
+                                          </div>
+                                        )}
+                                        <div className="min-w-0">
+                                          <span className="text-xs font-extrabold text-slate-300 block truncate">
+                                            {teamA ? teamA.name : 'TBD'}
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      {/* Score */}
+                                      <div className="flex items-center gap-2 mx-4 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850">
+                                        <span className="text-sm font-black text-white">{match.played ? match.scoreA : '-'}</span>
+                                        <span className="text-slate-600 font-bold text-xs">:</span>
+                                        <span className="text-sm font-black text-white">{match.played ? match.scoreB : '-'}</span>
+                                      </div>
+
+                                      {/* Team B */}
+                                      <div className="flex items-center gap-2.5 flex-1 justify-end min-w-0 text-right">
+                                        <div className="min-w-0">
+                                          <span className="text-xs font-extrabold text-slate-300 block truncate">
+                                            {teamB ? teamB.name : 'TBD'}
+                                          </span>
+                                        </div>
+                                        {teamB ? renderTeamBadge(teamB, 'w-8 h-8') : (
+                                          <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                                            <span className="text-[10px] font-bold text-slate-500">TBD</span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {canEditCurrentTour && (
+                                      <div className="flex items-center justify-between mt-3 pt-2 border-t border-slate-800/50">
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            showConfirm(
+                                              '¿Eliminar Llave?',
+                                              '¿Está seguro de querer eliminar este enfrentamiento permanentemente?',
+                                              () => {
+                                                const updatedMatches = matches.filter(m => m.id !== match.id);
+                                                saveState(teams, tournaments, updatedMatches);
+                                              }
+                                            );
+                                          }}
+                                          className="text-[10px] font-bold text-red-400 hover:text-red-300 transition"
+                                        >
+                                          Eliminar Enfrentamiento
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 transition flex items-center gap-1"
+                                        >
+                                          <Edit2 className="w-3 h-3" /> Editar Marcador
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1942,15 +2257,26 @@ export default function App() {
                         key={tour.id}
                         className="bg-slate-900 border border-slate-800 rounded-2xl p-5 hover:border-slate-700 transition flex flex-col justify-between gap-4 cursor-pointer relative"
                         onClick={() => {
-                          setSelectedTournamentId(tour.id);
-                          setTournamentSubTab('matches');
+                          handleSelectTournament(tour);
                         }}
                       >
                         <div>
                           <div className="flex items-center justify-between mb-3">
-                            <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-900/40">
-                              {tour.type}
-                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-900/40">
+                                {tour.type}
+                              </span>
+                              {role !== 'admin' && (!!tour.adminPassword || !!tour.visitorPassword) && (
+                                <span className={`text-[9px] font-black uppercase px-1.5 py-0.5 rounded flex items-center gap-1 border ${
+                                  unlockedTournaments[tour.id]
+                                    ? 'bg-slate-900 text-emerald-400 border-slate-800'
+                                    : 'bg-slate-950 text-amber-500 border-amber-900/30'
+                                }`}>
+                                  <Lock className="w-2.5 h-2.5" />
+                                  {unlockedTournaments[tour.id] ? unlockedTournaments[tour.id] : 'Bloqueado'}
+                                </span>
+                              )}
+                            </div>
                             
                             {role === 'admin' && (
                               <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
@@ -2401,6 +2727,35 @@ export default function App() {
                       className="w-8 h-8 rounded-lg object-contain border border-slate-800 bg-slate-950 p-0.5" 
                     />
                   )}
+                </div>
+              </div>
+
+              {/* Optional tournament passwords */}
+              <div className="border-t border-slate-800/80 pt-4 space-y-3">
+                <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Configuración de Seguridad (Opcional)</h4>
+                <p className="text-[10px] text-slate-400 leading-relaxed">Establece contraseñas para restringir el acceso a este torneo. Deja en blanco para permitir acceso libre a todos los visitantes.</p>
+                
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-400 mb-1">Contraseña AdminTorneo</label>
+                    <input
+                      type="text"
+                      placeholder="Ej: adm123"
+                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-xs focus:outline-none"
+                      value={newTournament.adminPassword}
+                      onChange={(e) => setNewTournament(prev => ({ ...prev, adminPassword: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-400 mb-1">Contraseña Visitante</label>
+                    <input
+                      type="text"
+                      placeholder="Ej: vis123"
+                      className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-xs focus:outline-none"
+                      value={newTournament.visitorPassword}
+                      onChange={(e) => setNewTournament(prev => ({ ...prev, visitorPassword: e.target.value }))}
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -3177,6 +3532,193 @@ export default function App() {
                 {confirmModalState.confirmText}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: ENTER TOURNAMENT PASSWORD --- */}
+      {passwordCheckingTourId && (
+        <div className="fixed inset-0 z-[110] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-sm p-6 relative overflow-hidden shadow-2xl">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-green-400 to-emerald-600" />
+            
+            <h3 className="text-lg font-extrabold text-white mb-1">Ingresar al Torneo</h3>
+            <p className="text-xs text-slate-400 mb-4">
+              Este torneo está restringido. Ingresa la contraseña asignada por el Administrador.
+            </p>
+
+            <form onSubmit={handleVerifyTournamentPassword} className="space-y-4">
+              <div className="relative">
+                <input
+                  type={showTourPassword ? 'text' : 'password'}
+                  required
+                  placeholder="Contraseña del torneo"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none pr-10"
+                  value={tourPasswordValue}
+                  onChange={(e) => {
+                    setTourPasswordValue(e.target.value);
+                    setTourPasswordError('');
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowTourPassword(!showTourPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
+                >
+                  {showTourPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+
+              {tourPasswordError && (
+                <p className="text-xs text-red-500 font-bold text-center bg-red-950/30 border border-red-900/40 py-1.5 rounded-lg">
+                  {tourPasswordError}
+                </p>
+              )}
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPasswordCheckingTourId(null)}
+                  className="flex-1 py-2 bg-slate-850 hover:bg-slate-800 text-slate-300 text-xs font-bold rounded-xl transition"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition"
+                >
+                  Acceder
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: ADD MANUAL LLAVE --- */}
+      {showAddManualLlaveModal && currentTour && (
+        <div className="fixed inset-0 z-[110] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 relative overflow-hidden shadow-2xl">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-green-400 to-emerald-600" />
+            
+            <h3 className="text-lg font-extrabold text-white mb-1">Agregar Llave / Enfrentamiento</h3>
+            <p className="text-xs text-slate-400 mb-4">
+              Crea un cruce eliminatorio en la fase de este torneo.
+            </p>
+
+            <form onSubmit={handleCreateManualLlave} className="space-y-4">
+              {/* Phase / Title */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Fase / Título de la Llave *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej: Segunda Fase, Octavos de Final..."
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none mb-2"
+                  value={manualLlaveState.phaseName}
+                  onChange={(e) => setManualLlaveState(prev => ({ ...prev, phaseName: e.target.value }))}
+                />
+                
+                {/* Visual quick pills */}
+                <div className="flex flex-wrap gap-1.5 mt-1">
+                  {['Segunda Fase', 'Octavos', 'Cuartos', 'Semis', 'Final'].map(p => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setManualLlaveState(prev => ({ ...prev, phaseName: p }))}
+                      className={`px-2.5 py-1 text-[10px] font-bold rounded-md border transition cursor-pointer ${
+                        manualLlaveState.phaseName === p 
+                          ? 'bg-emerald-600 text-white border-emerald-500' 
+                          : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Team A Selection */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Equipo Local (A) *</label>
+                <select
+                  required
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-200 text-sm focus:outline-none focus:border-emerald-500"
+                  value={manualLlaveState.teamAId}
+                  onChange={(e) => setManualLlaveState(prev => ({ ...prev, teamAId: e.target.value }))}
+                >
+                  <option value="">-- Seleccionar Equipo --</option>
+                  {currentTour.teams.map(tt => {
+                    const team = teams.find(t => t.id === tt.teamId);
+                    return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
+                  })}
+                </select>
+              </div>
+
+              {/* Team B Selection */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Equipo Visitante (B) *</label>
+                <select
+                  required
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-200 text-sm focus:outline-none focus:border-emerald-500"
+                  value={manualLlaveState.teamBId}
+                  onChange={(e) => setManualLlaveState(prev => ({ ...prev, teamBId: e.target.value }))}
+                >
+                  <option value="">-- Seleccionar Equipo --</option>
+                  {currentTour.teams
+                    .filter(tt => tt.teamId !== manualLlaveState.teamAId)
+                    .map(tt => {
+                      const team = teams.find(t => t.id === tt.teamId);
+                      return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
+                    })}
+                </select>
+              </div>
+
+              {/* Goles/Marcador optional editor */}
+              <div className="bg-slate-950/50 p-3 rounded-2xl border border-slate-800/80">
+                <span className="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-wide">Marcador (Opcional)</span>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-500 mb-1">Goles Local (A)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="-"
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-850 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                      value={manualLlaveState.scoreA}
+                      onChange={(e) => setManualLlaveState(prev => ({ ...prev, scoreA: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-500 mb-1">Goles Visitante (B)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="-"
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-850 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                      value={manualLlaveState.scoreB}
+                      onChange={(e) => setManualLlaveState(prev => ({ ...prev, scoreB: e.target.value }))}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddManualLlaveModal(false)}
+                  className="flex-1 py-2 bg-slate-850 hover:bg-slate-800 text-slate-300 text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  Crear Llave
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
