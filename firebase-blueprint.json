@@ -1,0 +1,35 @@
+{
+  "collections": {
+    "teams": {
+      "id": "string",
+      "name": "string",
+      "primaryColor": "string",
+      "secondaryColor": "string",
+      "badgeSymbol": "string",
+      "logoUrl": "string"
+    },
+    "tournaments": {
+      "id": "string",
+      "name": "string",
+      "type": "string",
+      "numGroups": "number",
+      "numTeams": "number",
+      "faseFinalType": "string",
+      "logoUrl": "string",
+      "teams": "array"
+    },
+    "matches": {
+      "id": "string",
+      "tournamentId": "string",
+      "teamAId": "string",
+      "teamBId": "string",
+      "scoreA": "number",
+      "scoreB": "number",
+      "played": "boolean",
+      "round": "string",
+      "bracketSlot": "number",
+      "group": "string",
+      "overrideTeams": "boolean"
+    }
+  }
+}

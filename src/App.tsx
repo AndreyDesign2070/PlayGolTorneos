@@ -10,6 +10,14 @@ import {
   Star, Crown, Zap
 } from 'lucide-react';
 
+import { auth, db } from './lib/firebase';
+import { 
+  onSnapshot, collection, getDocs, doc, setDoc, deleteDoc, writeBatch 
+} from 'firebase/firestore';
+import { 
+  onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut 
+} from 'firebase/auth';
+
 // --- TYPES ---
 export interface Team {
   id: string;
@@ -72,6 +80,7 @@ export default function App() {
   });
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
 
   const [teams, setTeams] = useState<Team[]>([]);
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
@@ -188,157 +197,278 @@ export default function App() {
   const tourFileInputRef = useRef<HTMLInputElement>(null);
   const editTourFileInputRef = useRef<HTMLInputElement>(null);
 
-  // --- INITIAL SEED DATA & SYNC ENGINE ---
+  // --- INITIAL SEED DATA & SYNC ENGINE & AUTH SYSTEM ---
   useEffect(() => {
-    const fetchAndSyncState = async () => {
-      try {
-        const res = await fetch('/api/state');
-        if (res.ok) {
-          const data = await res.json();
-          if (data && Array.isArray(data.teams) && data.teams.length > 0) {
-            setTeams(data.teams);
-            setTournaments(data.tournaments);
-            setMatches(data.matches);
-            return;
-          }
+    // 1. Listen to Auth State changes in Firebase Auth (optional background sync)
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        if (user.email === 'admin@playgol.com') {
+          setRole('admin');
+          localStorage.setItem('playgol_role', 'admin');
+        } else if (user.email === 'visitor@playgol.com') {
+          setRole('visitor');
+          localStorage.setItem('playgol_role', 'visitor');
         }
-      } catch (err) {
-        console.error("Error fetching state from server:", err);
       }
+    });
 
-      // If server has no data or fetch fails, check localStorage fallback
-      const savedTeams = localStorage.getItem('playgol_teams');
-      const savedTournaments = localStorage.getItem('playgol_tournaments');
-      const savedMatches = localStorage.getItem('playgol_matches');
+    // 2. Load and Sync collections from Firestore
+    let unsubTeams: () => void = () => {};
+    let unsubTournaments: () => void = () => {};
+    let unsubMatches: () => void = () => {};
 
-      if (savedTeams && savedTournaments && savedMatches) {
-        const parsedTeams = JSON.parse(savedTeams);
-        const parsedTournaments = JSON.parse(savedTournaments);
-        const parsedMatches = JSON.parse(savedMatches);
-        setTeams(parsedTeams);
-        setTournaments(parsedTournaments);
-        setMatches(parsedMatches);
+    let isSeeding = false;
+    const seedFirestoreIfNeeded = async () => {
+      if (isSeeding) return;
+      isSeeding = true;
+      try {
+        console.log("Firestore tournaments collection is empty. Starting seeding process...");
+        let seedTeamsData: Team[] = [];
+        let seedTournamentsData: Tournament[] = [];
+        let seedMatchesData: Match[] = [];
 
-        // Upload to server so it has the state
-        fetch('/api/state', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ teams: parsedTeams, tournaments: parsedTournaments, matches: parsedMatches })
-        }).catch(err => console.error("Error syncing local state to server:", err));
-      } else {
-        // Create seed teams programmatically
-        const seedTeams: Team[] = [
-          { id: 't1', name: 'Alianza FC', primaryColor: '#1d4ed8', secondaryColor: '#ffffff', badgeSymbol: 'shield' },
-          { id: 't2', name: 'Deportivo Oro', primaryColor: '#eab308', secondaryColor: '#1e293b', badgeSymbol: 'crown' },
-          { id: 't3', name: 'Real Volcán', primaryColor: '#dc2626', secondaryColor: '#000000', badgeSymbol: 'flame' },
-          { id: 't4', name: 'Verde United', primaryColor: '#059669', secondaryColor: '#ffffff', badgeSymbol: 'ball' },
-          { id: 't5', name: 'Estrella FC', primaryColor: '#8b5cf6', secondaryColor: '#fef08a', badgeSymbol: 'star' },
-          { id: 't6', name: 'Relámpago FC', primaryColor: '#0ea5e9', secondaryColor: '#172554', badgeSymbol: 'zap' }
-        ];
-
-        const seedTournaments: Tournament[] = [
-          {
-            id: 'tour1',
-            name: 'Superliga PlayGol',
-            type: 'LIGA',
-            teams: seedTeams.map(t => ({ teamId: t.id }))
+        // Try fetching existing data from Express data.json to avoid losing the user's custom matchups!
+        try {
+          const apiRes = await fetch('/api/state');
+          if (apiRes.ok) {
+            const apiData = await apiRes.json();
+            if (apiData && Array.isArray(apiData.teams) && apiData.teams.length > 0) {
+              seedTeamsData = apiData.teams;
+              seedTournamentsData = apiData.tournaments;
+              seedMatchesData = apiData.matches;
+            }
           }
-        ];
+        } catch (e) {
+          console.error("Error fetching state from Express server to seed:", e);
+        }
 
-        const seedMatches: Match[] = [];
-        const generated = generateRoundRobinMatches('tour1', seedTeams.map(t => t.id));
-        generated.forEach((m, idx) => {
-          if (idx < 5) {
-            m.scoreA = Math.floor(Math.random() * 4);
-            m.scoreB = Math.floor(Math.random() * 4);
-            m.played = true;
-          }
-          seedMatches.push(m);
+        // Fallback to hardcoded seed if the server didn't have data
+        if (seedTeamsData.length === 0) {
+          seedTeamsData = [
+            { id: 't1', name: 'Alianza FC', primaryColor: '#1d4ed8', secondaryColor: '#ffffff', badgeSymbol: 'shield' },
+            { id: 't2', name: 'Deportivo Oro', primaryColor: '#eab308', secondaryColor: '#1e293b', badgeSymbol: 'crown' },
+            { id: 't3', name: 'Real Volcán', primaryColor: '#dc2626', secondaryColor: '#000000', badgeSymbol: 'flame' },
+            { id: 't4', name: 'Verde United', primaryColor: '#059669', secondaryColor: '#ffffff', badgeSymbol: 'ball' },
+            { id: 't5', name: 'Estrella FC', primaryColor: '#8b5cf6', secondaryColor: '#fef08a', badgeSymbol: 'star' },
+            { id: 't6', name: 'Relámpago FC', primaryColor: '#0ea5e9', secondaryColor: '#172554', badgeSymbol: 'zap' }
+          ];
+
+          seedTournamentsData = [
+            {
+              id: 'tour1',
+              name: 'Superliga PlayGol',
+              type: 'LIGA',
+              teams: seedTeamsData.map(t => ({ teamId: t.id }))
+            }
+          ];
+
+          const generated = generateRoundRobinMatches('tour1', seedTeamsData.map(t => t.id));
+          generated.forEach((m, idx) => {
+            if (idx < 5) {
+              m.scoreA = Math.floor(Math.random() * 4);
+              m.scoreB = Math.floor(Math.random() * 4);
+              m.played = true;
+            }
+            seedMatchesData.push(m);
+          });
+        }
+
+        // Perform batch write to populate Firestore collections
+        const batch = writeBatch(db);
+        seedTeamsData.forEach(t => {
+          batch.set(doc(db, "teams", t.id), t);
+        });
+        seedTournamentsData.forEach(t => {
+          batch.set(doc(db, "tournaments", t.id), t);
+        });
+        seedMatchesData.forEach(m => {
+          const mDoc = { ...m };
+          if (mDoc.group === undefined) delete mDoc.group;
+          if (mDoc.bracketSlot === undefined) delete mDoc.bracketSlot;
+          if ((mDoc as any).overrideTeams === undefined) delete (mDoc as any).overrideTeams;
+          batch.set(doc(db, "matches", m.id), mDoc);
         });
 
-        setTeams(seedTeams);
-        setTournaments(seedTournaments);
-        setMatches(seedMatches);
-
-        localStorage.setItem('playgol_teams', JSON.stringify(seedTeams));
-        localStorage.setItem('playgol_tournaments', JSON.stringify(seedTournaments));
-        localStorage.setItem('playgol_matches', JSON.stringify(seedMatches));
-
-        // Upload seed to server
-        fetch('/api/state', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ teams: seedTeams, tournaments: seedTournaments, matches: seedMatches })
-        }).catch(err => console.error("Error saving seed state to server:", err));
+        await batch.commit();
+        console.log("Firestore collections seeded successfully!");
+      } catch (err) {
+        console.error("Error in seedFirestoreIfNeeded:", err);
+      } finally {
+        isSeeding = false;
       }
     };
 
-    // First load
-    fetchAndSyncState();
+    const setupFirebaseSync = () => {
+      // 3. Subscribe to real-time changes in Firestore immediately & non-blockingly
+      unsubTeams = onSnapshot(collection(db, "teams"), (snapshot) => {
+        const list: Team[] = [];
+        snapshot.forEach(d => {
+          list.push(d.data() as Team);
+        });
+        setTeams(list);
+        setIsLoading(false);
+      }, (error) => {
+        console.error("Error in teams Firestore subscription:", error);
+        setIsLoading(false);
+      });
 
-    // Start polling every 2 seconds for real-time synchronization!
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch('/api/state');
-        if (res.ok) {
-          const data = await res.json();
-          if (data && Array.isArray(data.teams)) {
-            setTeams(data.teams);
-            setTournaments(data.tournaments);
-            setMatches(data.matches);
-          }
+      unsubTournaments = onSnapshot(collection(db, "tournaments"), (snapshot) => {
+        const list: Tournament[] = [];
+        snapshot.forEach(d => {
+          list.push(d.data() as Tournament);
+        });
+        setTournaments(list);
+        setIsLoading(false);
+
+        if (snapshot.empty) {
+          seedFirestoreIfNeeded();
         }
-      } catch (err) {
-        console.error("Error polling state from server:", err);
-      }
-    }, 2000);
+      }, (error) => {
+        console.error("Error in tournaments Firestore subscription:", error);
+        setIsLoading(false);
+      });
 
-    return () => clearInterval(interval);
+      unsubMatches = onSnapshot(collection(db, "matches"), (snapshot) => {
+        const list: Match[] = [];
+        snapshot.forEach(d => {
+          list.push(d.data() as Match);
+        });
+        setMatches(list);
+        setIsLoading(false);
+      }, (error) => {
+        console.error("Error in matches Firestore subscription:", error);
+        setIsLoading(false);
+      });
+    };
+
+    setupFirebaseSync();
+
+    return () => {
+      unsubscribeAuth();
+      unsubTeams();
+      unsubTournaments();
+      unsubMatches();
+    };
   }, []);
 
   // --- SAVE PERSISTENCE ---
-  const saveState = (updatedTeams: Team[], updatedTournaments: Tournament[], updatedMatches: Match[]) => {
+  const saveState = async (updatedTeams: Team[], updatedTournaments: Tournament[], updatedMatches: Match[]) => {
+    // Snappy UI state updates locally
     setTeams(updatedTeams);
     setTournaments(updatedTournaments);
     setMatches(updatedMatches);
+
+    // LocalStorage fallback
     localStorage.setItem('playgol_teams', JSON.stringify(updatedTeams));
     localStorage.setItem('playgol_tournaments', JSON.stringify(updatedTournaments));
     localStorage.setItem('playgol_matches', JSON.stringify(updatedMatches));
 
-    // Post to the Express API to synchronize and persist in real-time
-    fetch('/api/state', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        teams: updatedTeams,
-        tournaments: updatedTournaments,
-        matches: updatedMatches
-      })
-    }).catch(err => console.error("Error saving state to server:", err));
-  };
+    // Exclusive real-time update of Firestore on admin side
+    if (role === 'admin') {
+      try {
+        // Compare with current local states to perform targeted Firestore updates (diffing)
+        
+        // 1. Diff Teams
+        for (const t of updatedTeams) {
+          const existing = teams.find(x => x.id === t.id);
+          if (!existing || JSON.stringify(existing) !== JSON.stringify(t)) {
+            await setDoc(doc(db, 'teams', t.id), t);
+          }
+        }
+        for (const t of teams) {
+          if (!updatedTeams.some(x => x.id === t.id)) {
+            await deleteDoc(doc(db, 'teams', t.id));
+          }
+        }
 
-  // --- LOGIN LOGIC ---
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (password === 'Admingol') {
-      setRole('admin');
-      localStorage.setItem('playgol_role', 'admin');
-      setLoginError('');
-    } else if (password === 'Visitagol') {
-      setRole('visitor');
-      localStorage.setItem('playgol_role', 'visitor');
-      setLoginError('');
-    } else {
-      setLoginError('Contraseña incorrecta. Use "Admingol" o "Visitagol".');
+        // 2. Diff Tournaments
+        for (const t of updatedTournaments) {
+          const existing = tournaments.find(x => x.id === t.id);
+          if (!existing || JSON.stringify(existing) !== JSON.stringify(t)) {
+            await setDoc(doc(db, 'tournaments', t.id), t);
+          }
+        }
+        for (const t of tournaments) {
+          if (!updatedTournaments.some(x => x.id === t.id)) {
+            await deleteDoc(doc(db, 'tournaments', t.id));
+          }
+        }
+
+        // 3. Diff Matches
+        for (const m of updatedMatches) {
+          const existing = matches.find(x => x.id === m.id);
+          if (!existing || JSON.stringify(existing) !== JSON.stringify(m)) {
+            const mDoc = { ...m };
+            // Clean undefined fields for compatibility with Firestore
+            if (mDoc.group === undefined) delete mDoc.group;
+            if (mDoc.bracketSlot === undefined) delete mDoc.bracketSlot;
+            if ((mDoc as any).overrideTeams === undefined) delete (mDoc as any).overrideTeams;
+            await setDoc(doc(db, 'matches', m.id), mDoc);
+          }
+        }
+        for (const m of matches) {
+          if (!updatedMatches.some(x => x.id === m.id)) {
+            await deleteDoc(doc(db, 'matches', m.id));
+          }
+        }
+      } catch (err) {
+        console.error("Error writing updates to Firebase Firestore:", err);
+      }
     }
   };
 
-  const handleLogout = () => {
-    setRole(null);
-    localStorage.removeItem('playgol_role');
-    setPassword('');
+  // --- LOGIN LOGIC ---
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!password.trim()) {
+      setLoginError('Por favor ingresa una contraseña.');
+      return;
+    }
+
+    let targetEmail = '';
+    let targetRole: 'admin' | 'visitor' = 'visitor';
+    if (password === 'Admingol') {
+      targetEmail = 'admin@playgol.com';
+      targetRole = 'admin';
+    } else if (password === 'Visitagol') {
+      targetEmail = 'visitor@playgol.com';
+      targetRole = 'visitor';
+    } else {
+      setLoginError('Contraseña incorrecta. Use "Admingol" o "Visitagol".');
+      return;
+    }
+
+    // Set local state and local storage immediately so login is guaranteed to succeed and show the app instantly!
+    setRole(targetRole);
+    localStorage.setItem('playgol_role', targetRole);
+    setLoginError('');
+
+    try {
+      // Background attempt to sign in to Firebase Auth
+      await signInWithEmailAndPassword(auth, targetEmail, password);
+    } catch (authErr: any) {
+      // Background attempt to register user if not found
+      if (authErr.code === 'auth/user-not-found' || authErr.code === 'auth/invalid-credential' || authErr.code === 'auth/invalid-email') {
+        try {
+          await createUserWithEmailAndPassword(auth, targetEmail, password);
+        } catch (createErr: any) {
+          console.log("Firebase Auth background registration info:", createErr.message || createErr);
+        }
+      } else {
+        console.log("Firebase Auth background sign-in info (falling back to local session):", authErr.message || authErr);
+      }
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setRole(null);
+      localStorage.removeItem('playgol_role');
+      setPassword('');
+    } catch (err) {
+      console.error("Error signing out from Firebase Auth:", err);
+    }
   };
 
   // --- IMAGE UPLOAD HELPER (downscales to save localStorage size) ---
@@ -1183,6 +1313,20 @@ export default function App() {
       </div>
     );
   };
+
+  // --- LOADING SCREEN ---
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-3">
+          <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin" />
+          <p className="text-slate-400 text-sm font-semibold tracking-wide animate-pulse">
+            Cargando Base de Datos en Tiempo Real...
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // --- LOGIN WALL SCREEN ---
   if (!role) {
