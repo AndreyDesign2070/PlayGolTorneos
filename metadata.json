@@ -1,0 +1,6 @@
+{
+  "name": "PlayGol",
+  "description": "Crea y administra torneos de fútbol de tipo Liga, Grupos, Eliminación Directa y Fase Final, con actualización automática de posiciones y control de acceso para administradores y visitantes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
