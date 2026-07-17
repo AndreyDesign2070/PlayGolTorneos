@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Trophy, Shield, Calendar, Plus, Trash2, Edit2, Share2, Lock, LogOut, 
   Download, Upload, Info, Users, Check, ArrowRight, Sparkles, RefreshCw, Smartphone,
-  Star, Crown, Zap
+  Star, Crown, Zap, Eye, EyeOff
 } from 'lucide-react';
 
 import { auth, db } from './lib/firebase';
@@ -73,6 +73,29 @@ export interface StandingRow {
 
 const BADGE_SYMBOLS = ['ball', 'star', 'crown', 'trophy', 'shield', 'flame', 'zap'];
 
+// Helper to remove any undefined fields recursively for Firestore compatibility
+function cleanForFirestore(obj: any): any {
+  if (obj === null || obj === undefined) {
+    return null;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => cleanForFirestore(item));
+  }
+  if (typeof obj === 'object') {
+    const copy: any = {};
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        const val = obj[key];
+        if (val !== undefined) {
+          copy[key] = cleanForFirestore(val);
+        }
+      }
+    }
+    return copy;
+  }
+  return obj;
+}
+
 export default function App() {
   // --- STATE ---
   const [role, setRole] = useState<'admin' | 'visitor' | null>(() => {
@@ -80,6 +103,7 @@ export default function App() {
   });
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
   const [teams, setTeams] = useState<Team[]>([]);
@@ -353,15 +377,20 @@ export default function App() {
 
   // --- SAVE PERSISTENCE ---
   const saveState = async (updatedTeams: Team[], updatedTournaments: Tournament[], updatedMatches: Match[]) => {
+    // Recursively clean all collections for Firestore compatibility (removes undefined fields)
+    const cleanTeams = cleanForFirestore(updatedTeams) as Team[];
+    const cleanTournaments = cleanForFirestore(updatedTournaments) as Tournament[];
+    const cleanMatches = cleanForFirestore(updatedMatches) as Match[];
+
     // Snappy UI state updates locally
-    setTeams(updatedTeams);
-    setTournaments(updatedTournaments);
-    setMatches(updatedMatches);
+    setTeams(cleanTeams);
+    setTournaments(cleanTournaments);
+    setMatches(cleanMatches);
 
     // LocalStorage fallback
-    localStorage.setItem('playgol_teams', JSON.stringify(updatedTeams));
-    localStorage.setItem('playgol_tournaments', JSON.stringify(updatedTournaments));
-    localStorage.setItem('playgol_matches', JSON.stringify(updatedMatches));
+    localStorage.setItem('playgol_teams', JSON.stringify(cleanTeams));
+    localStorage.setItem('playgol_tournaments', JSON.stringify(cleanTournaments));
+    localStorage.setItem('playgol_matches', JSON.stringify(cleanMatches));
 
     // Exclusive real-time update of Firestore on admin side
     if (role === 'admin') {
@@ -369,45 +398,40 @@ export default function App() {
         // Compare with current local states to perform targeted Firestore updates (diffing)
         
         // 1. Diff Teams
-        for (const t of updatedTeams) {
+        for (const t of cleanTeams) {
           const existing = teams.find(x => x.id === t.id);
           if (!existing || JSON.stringify(existing) !== JSON.stringify(t)) {
             await setDoc(doc(db, 'teams', t.id), t);
           }
         }
         for (const t of teams) {
-          if (!updatedTeams.some(x => x.id === t.id)) {
+          if (!cleanTeams.some(x => x.id === t.id)) {
             await deleteDoc(doc(db, 'teams', t.id));
           }
         }
 
         // 2. Diff Tournaments
-        for (const t of updatedTournaments) {
+        for (const t of cleanTournaments) {
           const existing = tournaments.find(x => x.id === t.id);
           if (!existing || JSON.stringify(existing) !== JSON.stringify(t)) {
             await setDoc(doc(db, 'tournaments', t.id), t);
           }
         }
         for (const t of tournaments) {
-          if (!updatedTournaments.some(x => x.id === t.id)) {
+          if (!cleanTournaments.some(x => x.id === t.id)) {
             await deleteDoc(doc(db, 'tournaments', t.id));
           }
         }
 
         // 3. Diff Matches
-        for (const m of updatedMatches) {
+        for (const m of cleanMatches) {
           const existing = matches.find(x => x.id === m.id);
           if (!existing || JSON.stringify(existing) !== JSON.stringify(m)) {
-            const mDoc = { ...m };
-            // Clean undefined fields for compatibility with Firestore
-            if (mDoc.group === undefined) delete mDoc.group;
-            if (mDoc.bracketSlot === undefined) delete mDoc.bracketSlot;
-            if ((mDoc as any).overrideTeams === undefined) delete (mDoc as any).overrideTeams;
-            await setDoc(doc(db, 'matches', m.id), mDoc);
+            await setDoc(doc(db, 'matches', m.id), m);
           }
         }
         for (const m of matches) {
-          if (!updatedMatches.some(x => x.id === m.id)) {
+          if (!cleanMatches.some(x => x.id === m.id)) {
             await deleteDoc(doc(db, 'matches', m.id));
           }
         }
@@ -434,7 +458,7 @@ export default function App() {
       targetEmail = 'visitor@playgol.com';
       targetRole = 'visitor';
     } else {
-      setLoginError('Contraseña incorrecta. Use "Admingol" o "Visitagol".');
+      setLoginError('Contraseña incorrecta.');
       return;
     }
 
@@ -1365,12 +1389,20 @@ export default function App() {
                   <Lock className="w-5 h-5" />
                 </span>
                 <input
-                  type="password"
+                  type={showPassword ? "text" : "password"}
                   placeholder="Escribe la contraseña de acceso..."
-                  className="w-full pl-10 pr-4 py-3 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 focus:outline-none transition text-white placeholder-slate-600"
+                  className="w-full pl-10 pr-12 py-3 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 focus:outline-none transition text-white placeholder-slate-600"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute inset-y-0 right-0 flex items-center pr-3.5 text-slate-500 hover:text-slate-300 transition focus:outline-none"
+                  title={showPassword ? "Ocultar contraseña" : "Ver contraseña"}
+                >
+                  {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                </button>
               </div>
               {loginError && (
                 <p className="text-red-400 text-xs mt-2 font-medium bg-red-950/30 py-1.5 px-3 rounded-lg border border-red-900/30">
