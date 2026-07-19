@@ -60,6 +60,9 @@ export interface Match {
   round: string; // e.g., "Jornada 1", "Octavos", "Cuartos", "Semifinal", "Final"
   bracketSlot?: number; // Slot for brackets
   isLlave?: boolean;
+  freeTeamId?: string;
+  penaltiesA?: number | null;
+  penaltiesB?: number | null;
 }
 
 export interface StandingRow {
@@ -99,6 +102,22 @@ function cleanForFirestore(obj: any): any {
   return obj;
 }
 
+async function fetchWithRetry(url: string, options: RequestInit = {}, retries = 3, delay = 1000): Promise<Response> {
+  try {
+    const res = await fetch(url, options);
+    if (!res.ok) {
+      throw new Error(`HTTP error! status: ${res.status}`);
+    }
+    return res;
+  } catch (err) {
+    if (retries > 0) {
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return fetchWithRetry(url, options, retries - 1, delay * 2);
+    }
+    throw err;
+  }
+}
+
 export default function App() {
   // --- STATE ---
   const [role, setRole] = useState<'admin' | 'visitor' | null>(() => {
@@ -133,6 +152,12 @@ export default function App() {
       sessionStorage.setItem('playgol_unlocked_tournaments', JSON.stringify(updated));
       return updated;
     });
+  };
+
+  const checkCanEdit = (tourId?: string | null) => {
+    if (role === 'admin') return true;
+    if (tourId && unlockedTournaments[tourId] === 'AdminTorneo') return true;
+    return false;
   };
 
   // Tournament-specific password verification state
@@ -182,11 +207,17 @@ export default function App() {
     scoreA: '',
     scoreB: '',
     played: false,
-    group: 'A'
+    group: 'A',
+    freeTeamId: ''
   });
 
   // Manual Match creation modal
   const [showManualMatchModal, setShowManualMatchModal] = useState(false);
+
+  // Auto Llaves creation states
+  const [showAutoLlaveModal, setShowAutoLlaveModal] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [autoPhaseName, setAutoPhaseName] = useState('Octavos de Final');
 
   // Bracket pairing modal states
   const [showBracketPairingModal, setShowBracketPairingModal] = useState(false);
@@ -198,6 +229,8 @@ export default function App() {
   const [editingMatch, setEditingMatch] = useState<Match | null>(null);
   const [editScoreA, setEditScoreA] = useState<string>('');
   const [editScoreB, setEditScoreB] = useState<string>('');
+  const [editPenaltiesA, setEditPenaltiesA] = useState<string>('');
+  const [editPenaltiesB, setEditPenaltiesB] = useState<string>('');
 
   // Match Details Editor Modal
   const [editingMatchDetails, setEditingMatchDetails] = useState<Match | null>(null);
@@ -208,7 +241,10 @@ export default function App() {
     group: 'A',
     scoreA: '',
     scoreB: '',
-    overrideTeams: false
+    penaltiesA: '',
+    penaltiesB: '',
+    overrideTeams: false,
+    freeTeamId: ''
   });
 
   // Custom confirmation modal state
@@ -294,17 +330,15 @@ export default function App() {
 
         // Try fetching existing data from Express data.json to avoid losing the user's custom matchups!
         try {
-          const apiRes = await fetch('/api/state');
-          if (apiRes.ok) {
-            const apiData = await apiRes.json();
-            if (apiData && Array.isArray(apiData.teams) && apiData.teams.length > 0) {
-              seedTeamsData = apiData.teams;
-              seedTournamentsData = apiData.tournaments;
-              seedMatchesData = apiData.matches;
-            }
+          const apiRes = await fetchWithRetry('/api/state', {}, 3, 500);
+          const apiData = await apiRes.json();
+          if (apiData && Array.isArray(apiData.teams) && apiData.teams.length > 0) {
+            seedTeamsData = apiData.teams;
+            seedTournamentsData = apiData.tournaments;
+            seedMatchesData = apiData.matches;
           }
         } catch (e) {
-          console.error("Error fetching state from Express server to seed:", e);
+          console.warn("Could not fetch state from Express server to seed, falling back gracefully:", e);
         }
 
         // Fallback to hardcoded seed if the server didn't have data
@@ -416,12 +450,131 @@ export default function App() {
     };
   }, []);
 
+  // --- AUTOMATIC KNOCKOUT PROGRESSION (AUTO LLAVES ADVANCEMENT) ---
+  const autoAdvanceLlaves = (currentTourId: string, currentMatches: Match[]): Match[] => {
+    const tourLlaves = currentMatches.filter(m => m.tournamentId === currentTourId && m.isLlave === true);
+    if (tourLlaves.length === 0) return currentMatches;
+
+    const llavesByRound: Record<string, Match[]> = {};
+    tourLlaves.forEach(m => {
+      if (!llavesByRound[m.round]) llavesByRound[m.round] = [];
+      llavesByRound[m.round].push(m);
+    });
+
+    let updatedMatches = [...currentMatches];
+    let changed = false;
+
+    for (const [roundName, roundMatches] of Object.entries(llavesByRound)) {
+      const totalMatches = roundMatches.length;
+      // We only advance standard knockout powers of 2 (1, 2, 4, 8, 16)
+      if (totalMatches < 2 || (totalMatches & (totalMatches - 1)) !== 0) {
+        continue;
+      }
+
+      const allPlayed = roundMatches.every(m => {
+        if (!m.played || m.scoreA === null || m.scoreB === null) return false;
+        if (m.scoreA === m.scoreB) {
+          return m.penaltiesA !== undefined && m.penaltiesB !== undefined && m.penaltiesA !== null && m.penaltiesB !== null && m.penaltiesA !== m.penaltiesB;
+        }
+        return true;
+      });
+      if (!allPlayed) continue;
+
+      const sortedMatches = [...roundMatches].sort((a, b) => a.id.localeCompare(b.id));
+
+      const winners: string[] = sortedMatches.map(m => {
+        if ((m.scoreA ?? 0) > (m.scoreB ?? 0)) return m.teamAId;
+        if ((m.scoreB ?? 0) > (m.scoreA ?? 0)) return m.teamBId;
+        const penA = m.penaltiesA ?? 0;
+        const penB = m.penaltiesB ?? 0;
+        if (penA > penB) return m.teamAId;
+        if (penB > penA) return m.teamBId;
+        return m.teamAId; // fallback
+      }).filter(Boolean);
+
+      if (winners.length !== totalMatches) continue;
+
+      const nextMatchesCount = totalMatches / 2;
+      let nextRoundName = '';
+      if (nextMatchesCount === 4) nextRoundName = 'Cuartos de Final';
+      else if (nextMatchesCount === 2) nextRoundName = 'Semifinales';
+      else if (nextMatchesCount === 1) nextRoundName = 'Final';
+      else nextRoundName = `Fase Siguiente (${nextMatchesCount})`;
+
+      const existingNextRoundMatches = updatedMatches.filter(
+        m => m.tournamentId === currentTourId && m.isLlave === true && m.round === nextRoundName
+      );
+
+      if (existingNextRoundMatches.length === nextMatchesCount) {
+        const sortedNextMatches = [...existingNextRoundMatches].sort((a, b) => a.id.localeCompare(b.id));
+        let modifiedNextRound = false;
+
+        for (let i = 0; i < nextMatchesCount; i++) {
+          const nextMatch = sortedNextMatches[i];
+          const expectedTeamA = winners[i * 2];
+          const expectedTeamB = winners[i * 2 + 1];
+
+          if (nextMatch.teamAId !== expectedTeamA || nextMatch.teamBId !== expectedTeamB) {
+            updatedMatches = updatedMatches.map(m => {
+              if (m.id === nextMatch.id) {
+                return {
+                  ...m,
+                  teamAId: expectedTeamA,
+                  teamBId: expectedTeamB,
+                  scoreA: m.teamAId !== expectedTeamA ? null : m.scoreA,
+                  scoreB: m.teamBId !== expectedTeamB ? null : m.scoreB,
+                  played: m.teamAId !== expectedTeamA || m.teamBId !== expectedTeamB ? false : m.played
+                };
+              }
+              return m;
+            });
+            modifiedNextRound = true;
+          }
+        }
+
+        if (modifiedNextRound) {
+          changed = true;
+        }
+      } else if (existingNextRoundMatches.length === 0) {
+        const newNextMatches: Match[] = [];
+        for (let i = 0; i < nextMatchesCount; i++) {
+          newNextMatches.push({
+            id: `m-llave-auto-${Date.now()}-${nextRoundName.replace(/\s+/g, '-')}-${i}`,
+            tournamentId: currentTourId,
+            teamAId: winners[i * 2],
+            teamBId: winners[i * 2 + 1],
+            scoreA: null,
+            scoreB: null,
+            played: false,
+            round: nextRoundName,
+            isLlave: true
+          });
+        }
+
+        updatedMatches = [...updatedMatches, ...newNextMatches];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      return autoAdvanceLlaves(currentTourId, updatedMatches);
+    }
+
+    return updatedMatches;
+  };
+
   // --- SAVE PERSISTENCE ---
   const saveState = async (updatedTeams: Team[], updatedTournaments: Tournament[], updatedMatches: Match[]) => {
+    // Auto-advance any LLAVES in the tournament if a phase has been completed
+    let processedMatches = [...updatedMatches];
+    updatedTournaments.forEach(tour => {
+      processedMatches = autoAdvanceLlaves(tour.id, processedMatches);
+    });
+
     // Recursively clean all collections for Firestore compatibility (removes undefined fields)
     const cleanTeams = cleanForFirestore(updatedTeams) as Team[];
     const cleanTournaments = cleanForFirestore(updatedTournaments) as Tournament[];
-    const cleanMatches = cleanForFirestore(updatedMatches) as Match[];
+    const cleanMatches = cleanForFirestore(processedMatches) as Match[];
 
     // Snappy UI state updates locally
     setTeams(cleanTeams);
@@ -483,13 +636,13 @@ export default function App() {
 
       // Sync with Express backend to keep data.json always updated on the container
       try {
-        await fetch('/api/state', {
+        await fetchWithRetry('/api/state', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ teams: cleanTeams, tournaments: cleanTournaments, matches: cleanMatches })
-        });
+        }, 3, 500);
       } catch (apiErr) {
-        console.error("Error syncing state to Express server:", apiErr);
+        console.warn("Could not sync state to Express server, local changes are still safely saved to Firestore & LocalStorage:", apiErr);
       }
     }
   };
@@ -664,7 +817,8 @@ export default function App() {
       scoreB: null,
       played: false,
       round: newMatchState.round.trim() || 'Fecha 1',
-      group: currentTour?.type === 'GRUPOS' ? newMatchState.group : undefined
+      group: currentTour?.type === 'GRUPOS' ? newMatchState.group : undefined,
+      freeTeamId: newMatchState.freeTeamId || undefined
     };
 
     saveState(teams, tournaments, [...matches, created]);
@@ -677,12 +831,14 @@ export default function App() {
       scoreA: '',
       scoreB: '',
       played: false,
-      group: 'A'
+      group: 'A',
+      freeTeamId: ''
     });
   };
 
   const handleDeleteMatch = (matchId: string) => {
-    if (role !== 'admin') return;
+    const match = matches.find(m => m.id === matchId);
+    if (!checkCanEdit(match?.tournamentId)) return;
     showConfirm(
       '¿Eliminar Partido?',
       '¿Está seguro de querer eliminar este partido de la programación?',
@@ -767,7 +923,7 @@ export default function App() {
 
   // --- AUTOMATIC FIXTURE TRIGGER ---
   const handleGenerateFixture = (tour: Tournament) => {
-    if (role !== 'admin') return;
+    if (!checkCanEdit(tour.id)) return;
     
     showConfirm(
       'Generar Fixture Automático',
@@ -1059,7 +1215,7 @@ export default function App() {
   };
 
   const handleRemoveTeamFromTournament = (teamId: string) => {
-    if (role !== 'admin' || !selectedTournamentId) return;
+    if (!checkCanEdit(selectedTournamentId) || !selectedTournamentId) return;
     const team = teams.find(t => t.id === teamId);
     const teamName = team ? `"${team.name}"` : "este equipo";
     showConfirm(
@@ -1095,7 +1251,10 @@ export default function App() {
       group: match.group || 'A',
       scoreA: match.scoreA !== null ? String(match.scoreA) : '',
       scoreB: match.scoreB !== null ? String(match.scoreB) : '',
-      overrideTeams: (match as any).overrideTeams || false
+      penaltiesA: match.penaltiesA !== null && match.penaltiesA !== undefined ? String(match.penaltiesA) : '',
+      penaltiesB: match.penaltiesB !== null && match.penaltiesB !== undefined ? String(match.penaltiesB) : '',
+      overrideTeams: (match as any).overrideTeams || false,
+      freeTeamId: match.freeTeamId || ''
     });
   };
 
@@ -1105,6 +1264,8 @@ export default function App() {
 
     const sA = matchDetailsState.scoreA.trim() !== '' ? Number(matchDetailsState.scoreA) : null;
     const sB = matchDetailsState.scoreB.trim() !== '' ? Number(matchDetailsState.scoreB) : null;
+    const penA = matchDetailsState.penaltiesA.trim() !== '' ? Number(matchDetailsState.penaltiesA) : null;
+    const penB = matchDetailsState.penaltiesB.trim() !== '' ? Number(matchDetailsState.penaltiesB) : null;
     const isPlayed = sA !== null && sB !== null;
 
     const exists = matches.some(m => m.id === editingMatchDetails.id);
@@ -1120,9 +1281,12 @@ export default function App() {
             teamBId: matchDetailsState.teamBId,
             scoreA: sA,
             scoreB: sB,
+            penaltiesA: penA,
+            penaltiesB: penB,
             played: isPlayed,
             group: currentTour?.type === 'GRUPOS' ? matchDetailsState.group : undefined,
-            overrideTeams: matchDetailsState.overrideTeams
+            overrideTeams: matchDetailsState.overrideTeams,
+            freeTeamId: matchDetailsState.freeTeamId || undefined
           } as any;
         }
         return m;
@@ -1135,9 +1299,12 @@ export default function App() {
         teamBId: matchDetailsState.teamBId,
         scoreA: sA,
         scoreB: sB,
+        penaltiesA: penA,
+        penaltiesB: penB,
         played: isPlayed,
         group: undefined,
-        overrideTeams: matchDetailsState.overrideTeams
+        overrideTeams: matchDetailsState.overrideTeams,
+        freeTeamId: matchDetailsState.freeTeamId || undefined
       } as any;
       updated = [...matches, newMatch];
     }
@@ -1146,19 +1313,209 @@ export default function App() {
     setEditingMatchDetails(null);
   };
 
+  // --- AUTO LLAVES GENERATION SYSTEM FOR GROUPS ---
+  const getPairingTemplates = (numGroups: number) => {
+    if (numGroups === 2) {
+      return [
+        { id: '2g_semi', name: 'Semifinal Cruzada (4 equipos: 1ro vs 2do)', phaseName: 'Semifinales' },
+        { id: '2g_cuartos', name: 'Cuartos de Final Cruzados (8 equipos: 1ro vs 4to, 2do vs 3ro)', phaseName: 'Cuartos de Final' },
+        { id: '2g_cuartos_3ro', name: 'Cuartos con Mejores Terceros (8 equipos: 1ro vs Mejor 3ro, etc.)', phaseName: 'Cuartos de Final' }
+      ];
+    } else if (numGroups === 3) {
+      return [
+        { id: '3g_semi', name: 'Semifinal: 1ros de grupo + 1 Mejor Tercero (4 equipos)', phaseName: 'Semifinales' },
+        { id: '3g_cuartos', name: 'Cuartos: 1ros, 2dos de grupo + 2 Mejores Terceros (8 equipos)', phaseName: 'Cuartos de Final' }
+      ];
+    } else if (numGroups === 4) {
+      return [
+        { id: '4g_cuartos', name: 'Cuartos Cruzados: 1ro vs 2do (8 equipos)', phaseName: 'Cuartos de Final' },
+        { id: '4g_cuartos_3ro', name: 'Cuartos: 1ros vs 4 Mejores Terceros (8 equipos)', phaseName: 'Cuartos de Final' },
+        { id: '4g_octavos', name: 'Octavos Cruzados: 1ro vs 4to, 2do vs 3ro (16 equipos)', phaseName: 'Octavos de Final' }
+      ];
+    } else {
+      return [
+        { id: '5g_octavos', name: 'Octavos Estándar (16 equipos: 1ros, 2dos, 3ros + Mejor 4to)', phaseName: 'Octavos de Final' }
+      ];
+    }
+  };
+
+  const generateMatchupsFromTemplate = (tourId: string, templateId: string): { teamAId: string; teamBId: string; label: string }[] => {
+    const tour = tournaments.find(t => t.id === tourId);
+    if (!tour) return [];
+    
+    const numGroups = tour.numGroups || 2;
+    const groupsList = Array.from({ length: numGroups }, (_, i) => String.fromCharCode(65 + i));
+    
+    const standingsByGroup: Record<string, StandingRow[]> = {};
+    groupsList.forEach(g => {
+      standingsByGroup[g] = calculateStandings(tourId, g);
+    });
+
+    const getTeamId = (group: string, rank0: number): string => {
+      return standingsByGroup[group]?.[rank0]?.teamId || '';
+    };
+
+    const getBestThirdPlaces = (count: number): string[] => {
+      const thirds = groupsList.map(g => {
+        const std = standingsByGroup[g];
+        return std && std.length >= 3 ? { group: g, teamId: std[2].teamId, row: std[2] } : null;
+      }).filter((x): x is { group: string; teamId: string; row: StandingRow } => x !== null);
+      
+      thirds.sort((a, b) => {
+        if (b.row.points !== a.row.points) return b.row.points - a.row.points;
+        if (b.row.goalDifference !== a.row.goalDifference) return b.row.goalDifference - a.row.goalDifference;
+        return b.row.goalsFor - a.row.goalsFor;
+      });
+      return thirds.slice(0, count).map(x => x.teamId);
+    };
+
+    const getBestFourthPlaces = (count: number): string[] => {
+      const fourths = groupsList.map(g => {
+        const std = standingsByGroup[g];
+        return std && std.length >= 4 ? { group: g, teamId: std[3].teamId, row: std[3] } : null;
+      }).filter((x): x is { group: string; teamId: string; row: StandingRow } => x !== null);
+      
+      fourths.sort((a, b) => {
+        if (b.row.points !== a.row.points) return b.row.points - a.row.points;
+        if (b.row.goalDifference !== a.row.goalDifference) return b.row.goalDifference - a.row.goalDifference;
+        return b.row.goalsFor - a.row.goalsFor;
+      });
+      return fourths.slice(0, count).map(x => x.teamId);
+    };
+
+    if (templateId === '2g_semi') {
+      return [
+        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 1), label: '1ro Grupo A VS 2do Grupo B' },
+        { teamAId: getTeamId('B', 0), teamBId: getTeamId('A', 1), label: '1ro Grupo B VS 2do Grupo A' }
+      ];
+    }
+    
+    if (templateId === '2g_cuartos') {
+      return [
+        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 3), label: '1ro Grupo A VS 4to Grupo B' },
+        { teamAId: getTeamId('B', 0), teamBId: getTeamId('A', 3), label: '1ro Grupo B VS 4to Grupo A' },
+        { teamAId: getTeamId('A', 1), teamBId: getTeamId('B', 2), label: '2do Grupo A VS 3ro Grupo B' },
+        { teamAId: getTeamId('B', 1), teamBId: getTeamId('A', 2), label: '2do Grupo B VS 3ro Grupo A' }
+      ];
+    }
+
+    if (templateId === '2g_cuartos_3ro') {
+      const best3rds = getBestThirdPlaces(2);
+      return [
+        { teamAId: getTeamId('A', 0), teamBId: best3rds[1] || '', label: '1ro Grupo A VS 2do Mejor 3ro' },
+        { teamAId: getTeamId('B', 0), teamBId: best3rds[0] || '', label: '1ro Grupo B VS 1er Mejor 3ro' },
+        { teamAId: getTeamId('A', 1), teamBId: getTeamId('B', 2), label: '2do Grupo A VS 3ro Grupo B' },
+        { teamAId: getTeamId('B', 1), teamBId: getTeamId('A', 2), label: '2do Grupo B VS 3ro Grupo A' }
+      ];
+    }
+
+    if (templateId === '3g_semi') {
+      const best3rds = getBestThirdPlaces(1);
+      return [
+        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 0), label: '1ro Grupo A VS 1ro Grupo B' },
+        { teamAId: getTeamId('C', 0), teamBId: best3rds[0] || '', label: '1ro Grupo C VS Mejor 3ro' }
+      ];
+    }
+
+    if (templateId === '3g_cuartos') {
+      const best3rds = getBestThirdPlaces(2);
+      return [
+        { teamAId: getTeamId('A', 0), teamBId: best3rds[1] || '', label: '1ro Grupo A VS 2do Mejor 3ro' },
+        { teamAId: getTeamId('B', 0), teamBId: best3rds[0] || '', label: '1ro Grupo B VS 1er Mejor 3ro' },
+        { teamAId: getTeamId('C', 0), teamBId: getTeamId('B', 1), label: '1ro Grupo C VS 2do Grupo B' },
+        { teamAId: getTeamId('A', 1), teamBId: getTeamId('C', 1), label: '2do Grupo A VS 2do Grupo C' }
+      ];
+    }
+
+    if (templateId === '4g_cuartos') {
+      return [
+        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 1), label: '1ro Grupo A VS 2do Grupo B' },
+        { teamAId: getTeamId('B', 0), teamBId: getTeamId('A', 1), label: '1ro Grupo B VS 2do Grupo A' },
+        { teamAId: getTeamId('C', 0), teamBId: getTeamId('D', 1), label: '1ro Grupo C VS 2do Grupo D' },
+        { teamAId: getTeamId('D', 0), teamBId: getTeamId('C', 1), label: '1ro Grupo D VS 2do Grupo C' }
+      ];
+    }
+
+    if (templateId === '4g_cuartos_3ro') {
+      const best3rds = getBestThirdPlaces(4);
+      return [
+        { teamAId: getTeamId('A', 0), teamBId: best3rds[3] || '', label: '1ro Grupo A VS 4to Mejor 3ro' },
+        { teamAId: getTeamId('B', 0), teamBId: best3rds[2] || '', label: '1ro Grupo B VS 3er Mejor 3ro' },
+        { teamAId: getTeamId('C', 0), teamBId: best3rds[1] || '', label: '1ro Grupo C VS 2do Mejor 3ro' },
+        { teamAId: getTeamId('D', 0), teamBId: best3rds[0] || '', label: '1ro Grupo D VS 1er Mejor 3ro' }
+      ];
+    }
+
+    if (templateId === '4g_octavos') {
+      return [
+        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 3), label: '1ro Grupo A VS 4to Grupo B' },
+        { teamAId: getTeamId('B', 0), teamBId: getTeamId('A', 3), label: '1ro Grupo B VS 4to Grupo A' },
+        { teamAId: getTeamId('C', 0), teamBId: getTeamId('D', 3), label: '1ro Grupo C VS 4to Grupo D' },
+        { teamAId: getTeamId('D', 0), teamBId: getTeamId('C', 3), label: '1ro Grupo D VS 4to Grupo C' },
+        { teamAId: getTeamId('A', 1), teamBId: getTeamId('B', 2), label: '2do Grupo A VS 3ro Grupo B' },
+        { teamAId: getTeamId('B', 1), teamBId: getTeamId('A', 2), label: '2do Grupo B VS 3ro Grupo A' },
+        { teamAId: getTeamId('C', 1), teamBId: getTeamId('D', 2), label: '2do Grupo C VS 3ro Grupo D' },
+        { teamAId: getTeamId('D', 1), teamBId: getTeamId('C', 2), label: '2do Grupo D VS 3ro Grupo C' }
+      ];
+    }
+
+    if (templateId === '5g_octavos') {
+      const best4ths = getBestFourthPlaces(1);
+      return [
+        { teamAId: getTeamId('A', 0), teamBId: best4ths[0] || '', label: '1ro Grupo A VS Mejor 4to' },
+        { teamAId: getTeamId('C', 1), teamBId: getTeamId('A', 2), label: '2do Grupo C VS 3ro Grupo A' },
+        { teamAId: getTeamId('C', 0), teamBId: getTeamId('D', 2), label: '1ro Grupo C VS 3ro Grupo D' },
+        { teamAId: getTeamId('D', 0), teamBId: getTeamId('C', 2), label: '1ro Grupo D VS 3ro Grupo C' },
+        { teamAId: getTeamId('E', 0), teamBId: getTeamId('B', 2), label: '1ro Grupo E VS 3ro Grupo B' },
+        { teamAId: getTeamId('A', 1), teamBId: getTeamId('D', 1), label: '2do Grupo A VS 2do Grupo D' },
+        { teamAId: getTeamId('B', 1), teamBId: getTeamId('E', 1), label: '2do Grupo B VS 2do Grupo E' },
+        { teamAId: getTeamId('B', 0), teamBId: getTeamId('E', 2), label: '1ro Grupo B VS 3ro Grupo E' }
+      ];
+    }
+
+    return [];
+  };
+
+  const handleAutoCreateLlaves = () => {
+    if (!currentTour || !selectedTemplateId) return;
+
+    const pairings = generateMatchupsFromTemplate(currentTour.id, selectedTemplateId);
+    
+    // Create actual matches
+    const createdMatches: Match[] = pairings.map((p, idx) => ({
+      id: `m-llave-auto-${Date.now()}-${idx}`,
+      tournamentId: currentTour.id,
+      teamAId: p.teamAId || '',
+      teamBId: p.teamBId || '',
+      scoreA: null,
+      scoreB: null,
+      played: false,
+      round: autoPhaseName.trim() || 'Fase Eliminatoria',
+      isLlave: true
+    }));
+
+    // Add them to the existing matches
+    saveState(teams, tournaments, [...matches, ...createdMatches]);
+    setShowAutoLlaveModal(false);
+  };
+
   const handleOpenScoreModal = (match: Match) => {
-    if (role !== 'admin') return;
+    if (!checkCanEdit(match.tournamentId)) return;
     setEditingMatch(match);
     setEditScoreA(match.scoreA !== null ? String(match.scoreA) : '');
     setEditScoreB(match.scoreB !== null ? String(match.scoreB) : '');
+    setEditPenaltiesA(match.penaltiesA !== null && match.penaltiesA !== undefined ? String(match.penaltiesA) : '');
+    setEditPenaltiesB(match.penaltiesB !== null && match.penaltiesB !== undefined ? String(match.penaltiesB) : '');
   };
 
   const handleSaveScore = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingMatch || role !== 'admin') return;
+    if (!editingMatch || !checkCanEdit(editingMatch.tournamentId)) return;
 
     const scoreA = editScoreA.trim() !== '' ? Number(editScoreA) : null;
     const scoreB = editScoreB.trim() !== '' ? Number(editScoreB) : null;
+    const penaltiesA = editPenaltiesA.trim() !== '' ? Number(editPenaltiesA) : null;
+    const penaltiesB = editPenaltiesB.trim() !== '' ? Number(editPenaltiesB) : null;
     const played = scoreA !== null && scoreB !== null;
 
     const exists = matches.some(m => m.id === editingMatch.id);
@@ -1171,6 +1528,8 @@ export default function App() {
             ...m,
             scoreA,
             scoreB,
+            penaltiesA,
+            penaltiesB,
             played
           };
         }
@@ -1183,6 +1542,8 @@ export default function App() {
           ...editingMatch,
           scoreA,
           scoreB,
+          penaltiesA,
+          penaltiesB,
           played
         }
       ];
@@ -1192,7 +1553,16 @@ export default function App() {
 
     // --- BRACKET AUTO-PROGRESSION LOGIC ---
     if (played && tour && (tour.type === 'ELIMINACION_DIRECTA' || tour.type === 'FASE_FINAL') && editingMatch.bracketSlot !== undefined) {
-      const winnerId = scoreA! > scoreB! ? editingMatch.teamAId : editingMatch.teamBId;
+      let winnerId = '';
+      if (scoreA! > scoreB!) {
+        winnerId = editingMatch.teamAId;
+      } else if (scoreB! > scoreA!) {
+        winnerId = editingMatch.teamBId;
+      } else {
+        const penA = penaltiesA !== null ? penaltiesA : 0;
+        const penB = penaltiesB !== null ? penaltiesB : 0;
+        winnerId = penA > penB ? editingMatch.teamAId : editingMatch.teamBId;
+      }
       const currentRound = editingMatch.round;
       let nextRound = '';
       let nextSlot = -1;
@@ -1274,6 +1644,7 @@ export default function App() {
     const tourPlayedMatches = matches.filter(m => 
       m.tournamentId === tournamentId && 
       m.played && 
+      m.isLlave !== true &&
       activeTeamIds.has(m.teamAId) && 
       activeTeamIds.has(m.teamBId)
     );
@@ -1542,8 +1913,8 @@ export default function App() {
 
           <form onSubmit={handleLogin} className="space-y-5">
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                Ingresa con tu Contraseña
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2 text-center w-full">
+                INGRESA TU CONTRASEÑA
               </label>
               <div className="relative">
                 <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500">
@@ -1622,12 +1993,12 @@ export default function App() {
           <div className="flex items-center gap-3">
             {/* Role indicator badge */}
             <div className={`text-xs px-3 py-1.5 rounded-full font-bold flex items-center gap-1.5 border ${
-              role === 'admin' 
+              (role === 'admin' || (selectedTournamentId && unlockedTournaments[selectedTournamentId] === 'AdminTorneo'))
                 ? 'bg-emerald-950/50 text-emerald-400 border-emerald-900' 
                 : 'bg-blue-950/50 text-blue-400 border-blue-900'
             }`}>
               <span className="w-2 h-2 rounded-full bg-current animate-pulse" />
-              {role === 'admin' ? 'Administrador' : 'Visitante'}
+              {(role === 'admin' || (selectedTournamentId && unlockedTournaments[selectedTournamentId] === 'AdminTorneo')) ? 'Administrador' : 'Visitante'}
             </div>
 
             <button 
@@ -1709,7 +2080,7 @@ export default function App() {
                     : 'border-transparent text-slate-400 hover:text-slate-200'
                 }`}
               >
-                Calendario de Partidos ({matches.filter(m => m.tournamentId === currentTour.id).length})
+                Calendario de Partidos ({matches.filter(m => m.tournamentId === currentTour.id && m.isLlave !== true && m.round !== 'LLAVES').length})
               </button>
               {(currentTour.type === 'LIGA' || currentTour.type === 'GRUPOS') && (
                 <button
@@ -1778,7 +2149,7 @@ export default function App() {
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3 mb-4">
                   <h3 className="text-lg font-bold text-white">Todos los Enfrentamientos</h3>
                   
-                  {role === 'admin' && (
+                  {canEditCurrentTour && (
                     <div className="flex flex-wrap gap-2">
                       <button
                         onClick={() => {
@@ -1834,7 +2205,7 @@ export default function App() {
                         </h3>
                       </div>
                       <p className="text-xs text-slate-400 max-w-xl mx-auto leading-relaxed">
-                        Las llaves se definen dinámicamente según el orden final de los grupos (A, B, C, D, E) y el mejor 4to lugar de todos los grupos. {role === 'admin' && 'Como administrador, puedes editar marcadores y sobrescribir cruces manualmente.'}
+                        Las llaves se definen dinámicamente según el orden final de los grupos (A, B, C, D, E) y el mejor 4to lugar de todos los grupos. {canEditCurrentTour && 'Como administrador, puedes editar marcadores y sobrescribir cruces manualmente.'}
                       </p>
                     </div>
 
@@ -1849,14 +2220,14 @@ export default function App() {
                           <div 
                             key={match.id}
                             onClick={() => {
-                              if (role === 'admin') {
+                              if (canEditCurrentTour) {
                                 handleOpenScoreModal(match);
                               }
                             }}
                             className={`p-4 bg-slate-900 rounded-2xl border ${
                               match.played ? 'border-emerald-500/30 bg-emerald-950/5' : 'border-slate-800'
                             } hover:border-emerald-500/50 transition relative overflow-hidden flex flex-col justify-between ${
-                              role === 'admin' ? 'cursor-pointer' : ''
+                              canEditCurrentTour ? 'cursor-pointer' : ''
                             }`}
                           >
                             <div className="flex items-center justify-between border-b border-slate-800/80 pb-2 mb-3">
@@ -1892,10 +2263,17 @@ export default function App() {
 
                               <div className="flex flex-col items-center gap-1 mx-3 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850">
                                 {match.played ? (
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-base font-black text-white">{match.scoreA}</span>
-                                    <span className="text-slate-600 font-bold text-xs">-</span>
-                                    <span className="text-base font-black text-white">{match.scoreB}</span>
+                                  <div className="flex flex-col items-center gap-0.5">
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-base font-black text-white">{match.scoreA}</span>
+                                      <span className="text-slate-600 font-bold text-xs">-</span>
+                                      <span className="text-base font-black text-white">{match.scoreB}</span>
+                                    </div>
+                                    {match.scoreA === match.scoreB && match.penaltiesA !== null && match.penaltiesB !== null && (
+                                      <span className="text-[9px] text-amber-400 font-medium tracking-tight">
+                                        ({match.penaltiesA} - {match.penaltiesB} Pen)
+                                      </span>
+                                    )}
                                   </div>
                                 ) : (
                                   <span className="text-[9px] font-black text-slate-500 uppercase tracking-wider">VS</span>
@@ -1919,7 +2297,7 @@ export default function App() {
                               </div>
                             </div>
 
-                            {role === 'admin' && (
+                            {canEditCurrentTour && (
                               <div className="flex items-center justify-end gap-1.5 mt-3 pt-2 border-t border-slate-800/50">
                                 <button
                                   type="button"
@@ -1947,29 +2325,21 @@ export default function App() {
                         <p className="text-xs text-slate-400">Crea y gestiona las fases finales de forma personalizada.</p>
                       </div>
                       {canEditCurrentTour && (
-                        <button
-                          onClick={() => {
-                            setManualLlaveState({
-                              phaseName: 'Segunda Fase',
-                              teamAId: '',
-                              teamBId: '',
-                              scoreA: '',
-                              scoreB: '',
-                              played: false
-                            });
-                            setShowAddManualLlaveModal(true);
-                          }}
-                          className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1 transition shadow cursor-pointer"
-                        >
-                          <Plus className="w-3.5 h-3.5" /> Agregar Llave / Partido
-                        </button>
-                      )}
-                    </div>
-
-                    {matches.filter(m => m.tournamentId === currentTour.id && m.isLlave === true).length === 0 ? (
-                      <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl text-center">
-                        <p className="text-slate-400 text-sm">Aún no se han configurado llaves manuales para este torneo.</p>
-                        {canEditCurrentTour && (
+                        <div className="flex items-center gap-2">
+                          {currentTour.type === 'GRUPOS' && (
+                            <button
+                              onClick={() => {
+                                const templates = getPairingTemplates(currentTour.numGroups || 2);
+                                const firstTemplate = templates[0];
+                                setSelectedTemplateId(firstTemplate.id);
+                                setAutoPhaseName(firstTemplate.phaseName);
+                                setShowAutoLlaveModal(true);
+                              }}
+                              className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1 transition shadow cursor-pointer"
+                            >
+                              <Trophy className="w-3.5 h-3.5" /> CREAR LLAVES
+                            </button>
+                          )}
                           <button
                             onClick={() => {
                               setManualLlaveState({
@@ -1982,10 +2352,50 @@ export default function App() {
                               });
                               setShowAddManualLlaveModal(true);
                             }}
-                            className="mt-4 bg-emerald-600 text-white text-xs font-bold px-4 py-2 rounded-xl transition cursor-pointer"
+                            className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1 transition shadow cursor-pointer"
                           >
-                            Crear Primera Llave
+                            <Plus className="w-3.5 h-3.5" /> Agregar Llave / Partido
                           </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {matches.filter(m => m.tournamentId === currentTour.id && m.isLlave === true).length === 0 ? (
+                      <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl text-center">
+                        <p className="text-slate-400 text-sm">Aún no se han configurado llaves manuales para este torneo.</p>
+                        {canEditCurrentTour && (
+                          <div className="flex justify-center gap-2 mt-4 flex-wrap">
+                            {currentTour.type === 'GRUPOS' && (
+                              <button
+                                onClick={() => {
+                                  const templates = getPairingTemplates(currentTour.numGroups || 2);
+                                  const firstTemplate = templates[0];
+                                  setSelectedTemplateId(firstTemplate.id);
+                                  setAutoPhaseName(firstTemplate.phaseName);
+                                  setShowAutoLlaveModal(true);
+                                }}
+                                className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-4 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow"
+                              >
+                                <Trophy className="w-3.5 h-3.5" /> Crear Llaves Automáticamente
+                              </button>
+                            )}
+                            <button
+                              onClick={() => {
+                                setManualLlaveState({
+                                  phaseName: 'Segunda Fase',
+                                  teamAId: '',
+                                  teamBId: '',
+                                  scoreA: '',
+                                  scoreB: '',
+                                  played: false
+                                });
+                                setShowAddManualLlaveModal(true);
+                              }}
+                              className="bg-emerald-600 text-white text-xs font-bold px-4 py-2 rounded-xl transition cursor-pointer"
+                            >
+                              Crear Primera Llave
+                            </button>
+                          </div>
                         )}
                       </div>
                     ) : (
@@ -2037,10 +2447,17 @@ export default function App() {
                                       </div>
 
                                       {/* Score */}
-                                      <div className="flex items-center gap-2 mx-4 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850">
-                                        <span className="text-sm font-black text-white">{match.played ? match.scoreA : '-'}</span>
-                                        <span className="text-slate-600 font-bold text-xs">:</span>
-                                        <span className="text-sm font-black text-white">{match.played ? match.scoreB : '-'}</span>
+                                      <div className="flex flex-col items-center gap-0.5 mx-4 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850">
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-sm font-black text-white">{match.played ? match.scoreA : '-'}</span>
+                                          <span className="text-slate-600 font-bold text-xs">:</span>
+                                          <span className="text-sm font-black text-white">{match.played ? match.scoreB : '-'}</span>
+                                        </div>
+                                        {match.played && match.scoreA === match.scoreB && match.penaltiesA !== null && match.penaltiesB !== null && (
+                                          <span className="text-[9px] text-amber-400 font-medium tracking-tight">
+                                            ({match.penaltiesA} - {match.penaltiesB} Pen)
+                                          </span>
+                                        )}
                                       </div>
 
                                       {/* Team B */}
@@ -2107,7 +2524,7 @@ export default function App() {
               {currentTour.teams.length === 0 ? (
                 <div className="text-center py-6 border border-dashed border-slate-800 rounded-xl">
                   <p className="text-sm text-slate-400">No hay equipos asignados a este torneo aún.</p>
-                  {role === 'admin' && (
+                  {canEditCurrentTour && (
                     <button
                       onClick={() => setShowAssignModal(true)}
                       className="mt-3 bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 text-xs font-bold px-3 py-1.5 rounded-lg transition"
@@ -2135,7 +2552,7 @@ export default function App() {
                           </div>
                         </div>
 
-                        {role === 'admin' && (
+                        {canEditCurrentTour && (
                           <button
                             onClick={() => handleRemoveTeamFromTournament(tt.teamId)}
                             className="text-red-400 hover:text-red-300 p-1 rounded hover:bg-slate-900 transition md:opacity-0 group-hover:opacity-100"
@@ -2837,6 +3254,98 @@ export default function App() {
         </div>
       )}
 
+      {/* --- MODAL: CREAR LLAVES AUTO (TEMPLATE-BASED) --- */}
+      {showAutoLlaveModal && currentTour && (
+        <div className="fixed inset-0 z-[110] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-6 relative overflow-hidden shadow-2xl">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 via-emerald-400 to-blue-600" />
+            
+            <h3 className="text-lg font-extrabold text-white mb-1">Crear Llaves Automáticamente</h3>
+            <p className="text-xs text-slate-400 mb-4">
+              Selecciona una plantilla de emparejamiento. La app calculará las posiciones actuales de cada grupo y creará los partidos.
+            </p>
+
+            <div className="space-y-4">
+              {/* Template selection */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Plantilla de Emparejamientos</label>
+                <select
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-200 text-sm focus:outline-none focus:border-emerald-500"
+                  value={selectedTemplateId}
+                  onChange={(e) => {
+                    setSelectedTemplateId(e.target.value);
+                    const templates = getPairingTemplates(currentTour.numGroups || 2);
+                    const match = templates.find(t => t.id === e.target.value);
+                    if (match) {
+                      setAutoPhaseName(match.phaseName);
+                    }
+                  }}
+                >
+                  {getPairingTemplates(currentTour.numGroups || 2).map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Phase name input */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Nombre de la Fase (Título)</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej: Cuartos de Final..."
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                  value={autoPhaseName}
+                  onChange={(e) => setAutoPhaseName(e.target.value)}
+                />
+              </div>
+
+              {/* Pairings preview list */}
+              <div className="bg-slate-950/60 p-4 rounded-2xl border border-slate-850 max-h-60 overflow-y-auto space-y-2">
+                <span className="block text-[10px] font-bold text-emerald-400 uppercase tracking-wider mb-2">Vista Previa de Enfrentamientos</span>
+                {(() => {
+                  const pairings = generateMatchupsFromTemplate(currentTour.id, selectedTemplateId);
+                  if (pairings.length === 0) {
+                    return <p className="text-xs text-slate-500 text-center">No hay partidos calculados para esta plantilla.</p>;
+                  }
+                  return pairings.map((p, idx) => {
+                    const teamA = teams.find(t => t.id === p.teamAId);
+                    const teamB = teams.find(t => t.id === p.teamBId);
+                    return (
+                      <div key={idx} className="flex items-center justify-between py-1.5 px-2.5 bg-slate-900/50 rounded-lg border border-slate-850/50 text-xs">
+                        <span className="font-semibold text-slate-400 text-[10px]">{p.label}</span>
+                        <div className="flex items-center gap-1.5 font-bold text-white">
+                          <span className={teamA ? 'text-white' : 'text-slate-500'}>{teamA ? teamA.name : 'Por clasificar'}</span>
+                          <span className="text-slate-600 font-bold text-[10px]">vs</span>
+                          <span className={teamB ? 'text-white' : 'text-slate-500'}>{teamB ? teamB.name : 'Por clasificar'}</span>
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAutoLlaveModal(false)}
+                  className="flex-1 py-2 bg-slate-850 hover:bg-slate-800 text-slate-300 text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAutoCreateLlaves}
+                  className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  Generar y Guardar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* --- MODAL: CREATE MANUAL MATCH --- */}
       {showManualMatchModal && currentTour && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -2921,6 +3430,31 @@ export default function App() {
                     })}
                 </select>
               </div>
+
+              {/* Optional Free Team Selection (Only when the tournament or group team count is ODD) */}
+              {(() => {
+                const groupTeamsCount = currentTour.type === 'GRUPOS'
+                  ? currentTour.teams.filter(tt => tt.group === newMatchState.group).length
+                  : currentTour.teams.length;
+                return groupTeamsCount % 2 !== 0;
+              })() && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Equipo Libre por esta Fecha (Opcional)</label>
+                  <select
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-200 text-sm focus:outline-none focus:border-emerald-500"
+                    value={newMatchState.freeTeamId}
+                    onChange={(e) => setNewMatchState(prev => ({ ...prev, freeTeamId: e.target.value }))}
+                  >
+                    <option value="">-- Ninguno / Sin Equipo Libre --</option>
+                    {currentTour.teams
+                      .filter(tt => currentTour.type !== 'GRUPOS' || tt.group === newMatchState.group)
+                      .map(tt => {
+                        const team = teams.find(t => t.id === tt.teamId);
+                        return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
+                      })}
+                  </select>
+                </div>
+              )}
 
               <div className="flex gap-2 pt-2">
                 <button
@@ -3065,6 +3599,42 @@ export default function App() {
                 </div>
 
               </div>
+
+              {/* Optional penalty shootouts for knockout matches */}
+              {editingMatch && (() => {
+                const tour = tournaments.find(t => t.id === editingMatch.tournamentId);
+                const isKnockout = editingMatch.isLlave || (tour && (tour.type === 'ELIMINACION_DIRECTA' || tour.type === 'FASE_FINAL'));
+                return isKnockout;
+              })() && (
+                <div className="bg-slate-950/50 p-3 rounded-2xl border border-slate-800/80 space-y-2">
+                  <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-wide text-center">Tanda de Penales (En caso de empate)</span>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex flex-col items-center flex-1">
+                      <label className="text-[10px] font-semibold text-slate-500 mb-1">Penales Local</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="-"
+                        className="w-12 h-9 text-center bg-slate-900 border border-slate-800 rounded-lg text-sm font-bold focus:border-emerald-500 focus:outline-none text-white"
+                        value={editPenaltiesA}
+                        onChange={(e) => setEditPenaltiesA(e.target.value)}
+                      />
+                    </div>
+                    <div className="text-slate-600 font-extrabold text-xs">PK</div>
+                    <div className="flex flex-col items-center flex-1">
+                      <label className="text-[10px] font-semibold text-slate-500 mb-1">Penales Visita</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="-"
+                        className="w-12 h-9 text-center bg-slate-900 border border-slate-800 rounded-lg text-sm font-bold focus:border-emerald-500 focus:outline-none text-white"
+                        value={editPenaltiesB}
+                        onChange={(e) => setEditPenaltiesB(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Informative help note */}
               <p className="text-[10px] text-slate-500 text-center leading-relaxed">
@@ -3459,6 +4029,31 @@ export default function App() {
                 </select>
               </div>
 
+              {/* Optional Free Team Selection (Only when the tournament or group team count is ODD) */}
+              {currentTour && (() => {
+                const groupTeamsCount = currentTour.type === 'GRUPOS'
+                  ? currentTour.teams.filter(tt => tt.group === matchDetailsState.group).length
+                  : currentTour.teams.length;
+                return groupTeamsCount % 2 !== 0;
+              })() && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Equipo Libre por esta Fecha (Opcional)</label>
+                  <select
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-200 text-sm focus:outline-none focus:border-emerald-500"
+                    value={matchDetailsState.freeTeamId}
+                    onChange={(e) => setMatchDetailsState(prev => ({ ...prev, freeTeamId: e.target.value }))}
+                  >
+                    <option value="">-- Ninguno / Sin Equipo Libre --</option>
+                    {currentTour.teams
+                      .filter(tt => currentTour.type !== 'GRUPOS' || tt.group === matchDetailsState.group)
+                      .map(tt => {
+                        const team = teams.find(t => t.id === tt.teamId);
+                        return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
+                      })}
+                  </select>
+                </div>
+              )}
+
               {/* Goles/Marcador optional editor */}
               <div className="bg-slate-950/50 p-3 rounded-2xl border border-slate-800/80">
                 <span className="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-wide">Marcador (Opcional)</span>
@@ -3487,6 +4082,40 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              {/* Optional penalty shootouts for knockout matches inside Details Modal */}
+              {editingMatchDetails && (() => {
+                const isKnockout = editingMatchDetails.isLlave || editingMatchDetails.round === 'LLAVES' || (currentTour && (currentTour.type === 'ELIMINACION_DIRECTA' || currentTour.type === 'FASE_FINAL'));
+                return isKnockout;
+              })() && (
+                <div className="bg-slate-950/50 p-3 rounded-2xl border border-slate-800/80">
+                  <span className="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-wide">Penales en caso de empate (Opcional)</span>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-500 mb-1">Penales Local (A)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="-"
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-850 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                        value={matchDetailsState.penaltiesA}
+                        onChange={(e) => setMatchDetailsState(prev => ({ ...prev, penaltiesA: e.target.value }))}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-500 mb-1">Penales Visitante (B)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="-"
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-850 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                        value={matchDetailsState.penaltiesB}
+                        onChange={(e) => setMatchDetailsState(prev => ({ ...prev, penaltiesB: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="flex gap-2 pt-2">
                 <button
@@ -3787,7 +4416,7 @@ export default function App() {
 
   // --- SUBCOMPONENTS: FIXTURE MATCH LIST RENDERER ---
   function renderMatchList(tour: Tournament) {
-    const tourMatches = matches.filter(m => m.tournamentId === tour.id);
+    const tourMatches = matches.filter(m => m.tournamentId === tour.id && m.isLlave !== true && m.round !== 'LLAVES');
 
     if (tourMatches.length === 0) {
       return (
@@ -3851,7 +4480,7 @@ export default function App() {
                     key={match.id}
                     onClick={() => handleOpenScoreModal(match)}
                     className={`p-3.5 bg-slate-950 rounded-xl border border-slate-850 flex items-center justify-between transition ${
-                      role === 'admin' ? 'hover:border-emerald-500/50 cursor-pointer' : ''
+                      canEditCurrentTour ? 'hover:border-emerald-500/50 cursor-pointer' : ''
                     }`}
                   >
                     {/* Team A details */}
@@ -3875,11 +4504,13 @@ export default function App() {
                           <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">VS</span>
                         )}
                       </div>
-                      {tour.type === 'GRUPOS' && match.group && (
-                        <span className="text-[9px] font-extrabold text-emerald-400 bg-emerald-950/40 border border-emerald-900/30 px-1.5 py-0.5 rounded uppercase tracking-wider">
-                          Grupo {match.group}
-                        </span>
-                      )}
+                      <div className="flex flex-wrap gap-1 justify-center max-w-[120px]">
+                        {tour.type === 'GRUPOS' && match.group && (
+                          <span className="text-[9px] font-extrabold text-emerald-400 bg-emerald-950/40 border border-emerald-900/30 px-1.5 py-0.5 rounded uppercase tracking-wider">
+                            Grupo {match.group}
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     {/* Team B details */}
@@ -3891,7 +4522,7 @@ export default function App() {
                     </div>
 
                     {/* Admin Action Buttons */}
-                    {role === 'admin' && (
+                    {canEditCurrentTour && (
                       <div className="flex items-center ml-2 border-l border-slate-850 pl-2 gap-1 flex-shrink-0">
                         {/* Edit Match Details Button */}
                         <button
@@ -3924,6 +4555,45 @@ export default function App() {
                 );
               })}
             </div>
+
+            {/* Separate Box for Free Teams (Equipo Libre) */}
+            {(() => {
+              const freeTeamsInRound = roundList.filter(m => m.freeTeamId);
+              if (freeTeamsInRound.length === 0) return null;
+              
+              // We extract the unique freeTeamIds so we don't duplicate them in the display
+              const uniqueFreeTeams = Array.from(new Set(freeTeamsInRound.map(m => JSON.stringify({ id: m.freeTeamId, group: m.group, matchId: m.id }))));
+              
+              return (
+                <div className="p-4 bg-slate-900/40 border border-slate-800/60 rounded-2xl space-y-2 mt-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div>
+                    <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <Shield className="w-3.5 h-3.5 text-amber-500" /> EQUIPO LIBRE / DESCANSA ESTA FECHA
+                    </span>
+                    <p className="text-[10px] text-slate-400 mt-0.5">Este equipo no tiene programado partido para la presente jornada.</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {uniqueFreeTeams.map(itemStr => {
+                      const item = JSON.parse(itemStr);
+                      const fTeam = teams.find(t => t.id === item.id);
+                      if (!fTeam) return null;
+                      return (
+                        <div key={item.matchId} className="flex items-center gap-2 bg-slate-950 border border-slate-850 px-3.5 py-1.5 rounded-xl text-xs shadow-sm">
+                          {renderTeamBadge(fTeam, 'w-5 h-5')}
+                          <span className="font-extrabold text-white">{fTeam.name}</span>
+                          {tour.type === 'GRUPOS' && item.group && (
+                            <span className="text-[9px] font-extrabold text-emerald-400 bg-emerald-950/40 border border-emerald-900/30 px-1.5 py-0.5 rounded uppercase tracking-wider">
+                              Grupo {item.group}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
           </div>
         ))}
       </div>
@@ -3944,7 +4614,7 @@ export default function App() {
       return (
         <div className="text-center py-10 w-full">
           <p className="text-sm text-slate-400">No se ha generado el árbol de eliminación aún.</p>
-          {role === 'admin' && (
+          {canEditCurrentTour && (
             <button
               onClick={() => handleGenerateFixture(tour)}
               className="mt-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-4 py-2 rounded-xl transition"
@@ -3965,7 +4635,7 @@ export default function App() {
           onClick={() => handleOpenScoreModal(m)}
           className={`w-44 p-2.5 bg-slate-950 border rounded-xl flex flex-col gap-1.5 transition ${
             m.played ? 'border-slate-800' : 'border-slate-850'
-          } ${role === 'admin' ? 'hover:border-emerald-500 cursor-pointer' : ''}`}
+          } ${canEditCurrentTour ? 'hover:border-emerald-500 cursor-pointer' : ''}`}
         >
           {/* Team A line */}
           <div className="flex items-center justify-between gap-1 overflow-hidden">
