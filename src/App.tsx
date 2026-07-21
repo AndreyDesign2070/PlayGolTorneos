@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Trophy, Shield, Calendar, Plus, Trash2, Edit2, Share2, Lock, LogOut, 
   Download, Upload, Info, Users, Check, ArrowRight, Sparkles, RefreshCw, Smartphone,
-  Star, Crown, Zap, Eye, EyeOff
+  Star, Crown, Zap, Eye, EyeOff, Bell, Clock, MapPin
 } from 'lucide-react';
 
 import { auth, db } from './lib/firebase';
@@ -63,6 +63,15 @@ export interface Match {
   freeTeamId?: string;
   penaltiesA?: number | null;
   penaltiesB?: number | null;
+  time?: string;
+  venue?: string;
+}
+
+export interface AppNotification {
+  id: string;
+  text: string;
+  timestamp: number;
+  tournamentId?: string;
 }
 
 export interface StandingRow {
@@ -208,7 +217,9 @@ export default function App() {
     scoreB: '',
     played: false,
     group: 'A',
-    freeTeamId: ''
+    freeTeamId: '',
+    time: '',
+    venue: ''
   });
 
   // Manual Match creation modal
@@ -244,7 +255,9 @@ export default function App() {
     penaltiesA: '',
     penaltiesB: '',
     overrideTeams: false,
-    freeTeamId: ''
+    freeTeamId: '',
+    time: '',
+    venue: ''
   });
 
   // Custom confirmation modal state
@@ -288,6 +301,55 @@ export default function App() {
     });
   };
 
+  // Notifications & PWA Installation States
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [showNotificationsModal, setShowNotificationsModal] = useState(false);
+  const [showInstallModal, setShowInstallModal] = useState(false);
+  const [showNotifDropdown, setShowNotifDropdown] = useState(false);
+  const [lastReadNotificationTimestamp, setLastReadNotificationTimestamp] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('playgol_last_read_notif');
+      return saved ? Number(saved) : 0;
+    } catch {
+      return 0;
+    }
+  });
+  const [deviceOS, setDeviceOS] = useState<'ios' | 'android' | 'other'>('other');
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+
+  useEffect(() => {
+    const ua = navigator.userAgent.toLowerCase();
+    if (/iphone|ipad|ipod/.test(ua)) {
+      setDeviceOS('ios');
+    } else if (/android/.test(ua)) {
+      setDeviceOS('android');
+    } else {
+      setDeviceOS('other');
+    }
+
+    const handler = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  const handleInstallPWA = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      try {
+        const { outcome } = await deferredPrompt.userChoice;
+        if (outcome === 'accepted') {
+          setDeferredPrompt(null);
+          setShowInstallModal(false);
+        }
+      } catch (err) {
+        console.error("Install prompt error:", err);
+      }
+    }
+  };
+
   // Share message status
   const [copyStatus, setCopyStatus] = useState(false);
   const [importString, setImportString] = useState('');
@@ -317,6 +379,7 @@ export default function App() {
     let unsubTeams: () => void = () => {};
     let unsubTournaments: () => void = () => {};
     let unsubMatches: () => void = () => {};
+    let unsubNotifications: () => void = () => {};
 
     let isSeeding = false;
     const seedFirestoreIfNeeded = async () => {
@@ -438,6 +501,17 @@ export default function App() {
         console.error("Error in matches Firestore subscription:", error);
         setIsLoading(false);
       });
+
+      unsubNotifications = onSnapshot(collection(db, "notifications"), (snapshot) => {
+        const list: AppNotification[] = [];
+        snapshot.forEach(d => {
+          list.push(d.data() as AppNotification);
+        });
+        list.sort((a, b) => b.timestamp - a.timestamp);
+        setNotifications(list);
+      }, (error) => {
+        console.error("Error in notifications Firestore subscription:", error);
+      });
     };
 
     setupFirebaseSync();
@@ -447,6 +521,7 @@ export default function App() {
       unsubTeams();
       unsubTournaments();
       unsubMatches();
+      unsubNotifications();
     };
   }, []);
 
@@ -639,10 +714,51 @@ export default function App() {
         await fetchWithRetry('/api/state', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ teams: cleanTeams, tournaments: cleanTournaments, matches: cleanMatches })
+          body: JSON.stringify({ 
+            teams: cleanTeams, 
+            tournaments: cleanTournaments, 
+            matches: cleanMatches,
+            notifications
+          })
         }, 3, 500);
       } catch (apiErr) {
         console.warn("Could not sync state to Express server, local changes are still safely saved to Firestore & LocalStorage:", apiErr);
+      }
+    }
+  };
+
+  const sendNotification = async (text: string, tournamentId?: string) => {
+    const newNotif: AppNotification = {
+      id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      text,
+      timestamp: Date.now(),
+      tournamentId
+    };
+
+    const updatedNotifications = [newNotif, ...notifications].slice(0, 50);
+    setNotifications(updatedNotifications);
+
+    const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
+    if (isAuthorizedEditor) {
+      try {
+        await setDoc(doc(db, 'notifications', newNotif.id), newNotif);
+      } catch (err) {
+        console.error("Error writing notification to Firestore:", err);
+      }
+
+      try {
+        await fetchWithRetry('/api/state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            teams,
+            tournaments,
+            matches,
+            notifications: updatedNotifications
+          })
+        }, 3, 500);
+      } catch (apiErr) {
+        console.warn("Could not sync notification state to Express server:", apiErr);
       }
     }
   };
@@ -818,10 +934,21 @@ export default function App() {
       played: false,
       round: newMatchState.round.trim() || 'Fecha 1',
       group: currentTour?.type === 'GRUPOS' ? newMatchState.group : undefined,
-      freeTeamId: newMatchState.freeTeamId || undefined
+      freeTeamId: newMatchState.freeTeamId || undefined,
+      time: newMatchState.time.trim() || undefined,
+      venue: newMatchState.venue.trim() || undefined
     };
 
     saveState(teams, tournaments, [...matches, created]);
+    
+    // Trigger notification
+    const tour = tournaments.find(t => t.id === selectedTournamentId);
+    const teamAName = teams.find(t => t.id === newMatchState.teamAId)?.name || 'Equipo A';
+    const teamBName = teams.find(t => t.id === newMatchState.teamBId)?.name || 'Equipo B';
+    if (tour) {
+      sendNotification(`Actualización del torneo ${tour.name}: Se programó un nuevo enfrentamiento: ${teamAName} vs ${teamBName}`, tour.id);
+    }
+
     setShowManualMatchModal(false);
     // Reset state
     setNewMatchState({
@@ -832,7 +959,9 @@ export default function App() {
       scoreB: '',
       played: false,
       group: 'A',
-      freeTeamId: ''
+      freeTeamId: '',
+      time: '',
+      venue: ''
     });
   };
 
@@ -882,6 +1011,7 @@ export default function App() {
 
     const otherMatches = matches.filter(m => m.tournamentId !== bracketPairingTour.id);
     saveState(teams, tournaments, [...otherMatches, ...generated]);
+    sendNotification(`Actualización del torneo ${bracketPairingTour.name}: Se definieron los emparejamientos del árbol de eliminación (${bracketRoundName})`, bracketPairingTour.id);
     setShowBracketPairingModal(false);
     setBracketPairingTour(null);
     setTournamentSubTab('bracket');
@@ -990,6 +1120,7 @@ export default function App() {
 
         const otherMatches = matches.filter(m => m.tournamentId !== tour.id);
         saveState(teams, tournaments, [...otherMatches, ...generated]);
+        sendNotification(`Actualización del torneo ${tour.name}: Se generó el fixture completo del torneo`, tour.id);
         setTournamentSubTab(tour.type === 'LIGA' || tour.type === 'GRUPOS' ? 'matches' : 'bracket');
       },
       'Generar Fixture',
@@ -1254,7 +1385,9 @@ export default function App() {
       penaltiesA: match.penaltiesA !== null && match.penaltiesA !== undefined ? String(match.penaltiesA) : '',
       penaltiesB: match.penaltiesB !== null && match.penaltiesB !== undefined ? String(match.penaltiesB) : '',
       overrideTeams: (match as any).overrideTeams || false,
-      freeTeamId: match.freeTeamId || ''
+      freeTeamId: match.freeTeamId || '',
+      time: match.time || '',
+      venue: match.venue || ''
     });
   };
 
@@ -1286,7 +1419,9 @@ export default function App() {
             played: isPlayed,
             group: currentTour?.type === 'GRUPOS' ? matchDetailsState.group : undefined,
             overrideTeams: matchDetailsState.overrideTeams,
-            freeTeamId: matchDetailsState.freeTeamId || undefined
+            freeTeamId: matchDetailsState.freeTeamId || undefined,
+            time: matchDetailsState.time.trim() || undefined,
+            venue: matchDetailsState.venue.trim() || undefined
           } as any;
         }
         return m;
@@ -1304,12 +1439,31 @@ export default function App() {
         played: isPlayed,
         group: undefined,
         overrideTeams: matchDetailsState.overrideTeams,
-        freeTeamId: matchDetailsState.freeTeamId || undefined
+        freeTeamId: matchDetailsState.freeTeamId || undefined,
+        time: matchDetailsState.time.trim() || undefined,
+        venue: matchDetailsState.venue.trim() || undefined
       } as any;
       updated = [...matches, newMatch];
     }
 
     saveState(teams, tournaments, updated);
+
+    // Send notifications
+    const tour = tournaments.find(t => t.id === editingMatchDetails.tournamentId);
+    const teamA = teams.find(t => t.id === matchDetailsState.teamAId)?.name || 'Equipo A';
+    const teamB = teams.find(t => t.id === matchDetailsState.teamBId)?.name || 'Equipo B';
+    if (tour) {
+      if (isPlayed) {
+        let penText = "";
+        if (penA !== null && penB !== null) {
+          penText = ` (Pen: ${penA} - ${penB})`;
+        }
+        sendNotification(`Actualización del torneo ${tour.name}: Se actualizó el resultado: ${teamA} ${sA} - ${sB} ${teamB}${penText}`, tour.id);
+      } else {
+        sendNotification(`Actualización del torneo ${tour.name}: Se modificaron los detalles del partido ${teamA} vs ${teamB}`, tour.id);
+      }
+    }
+
     setEditingMatchDetails(null);
   };
 
@@ -1614,6 +1768,23 @@ export default function App() {
     }
 
     saveState(teams, tournaments, updatedMatches);
+
+    // Send notifications
+    const scoreTour = tournaments.find(t => t.id === editingMatch.tournamentId);
+    const teamA = teams.find(t => t.id === editingMatch.teamAId)?.name || 'Equipo A';
+    const teamB = teams.find(t => t.id === editingMatch.teamBId)?.name || 'Equipo B';
+    if (scoreTour) {
+      if (played) {
+        let penText = "";
+        if (penaltiesA !== null && penaltiesB !== null) {
+          penText = ` (Pen: ${penaltiesA} - ${penaltiesB})`;
+        }
+        sendNotification(`Actualización del torneo ${scoreTour.name}: Se actualizó el resultado: ${teamA} ${scoreA} - ${scoreB} ${teamB}${penText}`, scoreTour.id);
+      } else {
+        sendNotification(`Actualización del torneo ${scoreTour.name}: Se reinició el marcador de ${teamA} vs ${teamB}`, scoreTour.id);
+      }
+    }
+
     setEditingMatch(null);
   };
 
@@ -1991,6 +2162,90 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Notification Bell Dropdown */}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setShowNotifDropdown(!showNotifDropdown);
+                  if (notifications.length > 0) {
+                    const maxTimestamp = Math.max(...notifications.map(n => n.timestamp));
+                    setLastReadNotificationTimestamp(maxTimestamp);
+                    localStorage.setItem('playgol_last_read_notif', String(maxTimestamp));
+                  }
+                }}
+                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-xl transition relative cursor-pointer flex items-center justify-center"
+                title="Notificaciones"
+              >
+                <Bell className="w-4 h-4" />
+                {notifications.filter(n => n.timestamp > lastReadNotificationTimestamp).length > 0 && (
+                  <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white font-bold text-[9px] rounded-full flex items-center justify-center animate-pulse">
+                    {notifications.filter(n => n.timestamp > lastReadNotificationTimestamp).length}
+                  </span>
+                )}
+              </button>
+
+              {/* Dropdown Card */}
+              {showNotifDropdown && (
+                <div className="absolute right-0 mt-2 w-72 sm:w-80 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl z-50 p-3.5 space-y-2.5 max-h-[340px] overflow-y-auto">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                    <span className="text-xs font-black text-slate-200">Notificaciones Recientes</span>
+                    {notifications.length > 0 && (
+                      <button
+                        onClick={async () => {
+                          const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
+                          if (isAuthorizedEditor) {
+                            try {
+                              const batch = writeBatch(db);
+                              notifications.forEach(n => {
+                                batch.delete(doc(db, 'notifications', n.id));
+                              });
+                              await batch.commit();
+                            } catch (err) {
+                              console.error("Error clearing notifications in Firestore:", err);
+                            }
+                          }
+                          setNotifications([]);
+                        }}
+                        className="text-[10px] font-bold text-red-400 hover:text-red-300 transition"
+                      >
+                        Limpiar todo
+                      </button>
+                    )}
+                  </div>
+                  {notifications.length === 0 ? (
+                    <p className="text-xs text-slate-500 text-center py-5">No hay notificaciones</p>
+                  ) : (
+                    <div className="space-y-2 max-h-[240px] overflow-y-auto pr-0.5">
+                      {notifications.map(n => (
+                        <div key={n.id} className="p-2 bg-slate-950/70 border border-slate-850/80 rounded-xl text-[11px] leading-tight text-slate-300">
+                          <p className="font-medium">{n.text}</p>
+                          <span className="text-[9px] text-slate-500 block mt-1">
+                            {new Date(n.timestamp).toLocaleString()}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* "Crear Ícono" Green Button */}
+            <button
+              onClick={() => {
+                if (deferredPrompt) {
+                  handleInstallPWA();
+                } else {
+                  setShowInstallModal(true);
+                }
+              }}
+              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-slate-100 text-xs font-black rounded-xl flex items-center gap-1.5 transition shadow shadow-emerald-950 cursor-pointer"
+              title="Crear acceso directo en pantalla"
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span>Crear Ícono</span>
+            </button>
+
             {/* Role indicator badge */}
             <div className={`text-xs px-3 py-1.5 rounded-full font-bold flex items-center gap-1.5 border ${
               (role === 'admin' || (selectedTournamentId && unlockedTournaments[selectedTournamentId] === 'AdminTorneo'))
@@ -3456,6 +3711,29 @@ export default function App() {
                 </div>
               )}
 
+              {/* Optional Time and Venue fields for manual creation */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Hora (Opcional)</label>
+                  <input
+                    type="time"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                    value={newMatchState.time || ''}
+                    onChange={(e) => setNewMatchState(prev => ({ ...prev, time: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Sede (Opcional)</label>
+                  <input
+                    type="text"
+                    placeholder="Ej: Cancha 1, Estadio..."
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                    value={newMatchState.venue || ''}
+                    onChange={(e) => setNewMatchState(prev => ({ ...prev, venue: e.target.value }))}
+                  />
+                </div>
+              </div>
+
               <div className="flex gap-2 pt-2">
                 <button
                   type="button"
@@ -4054,6 +4332,29 @@ export default function App() {
                 </div>
               )}
 
+              {/* Optional Time and Venue fields */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Hora del Partido (Opcional)</label>
+                  <input
+                    type="time"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                    value={matchDetailsState.time || ''}
+                    onChange={(e) => setMatchDetailsState(prev => ({ ...prev, time: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">Sede/Lugar (Opcional)</label>
+                  <input
+                    type="text"
+                    placeholder="Ej: Cancha 3, Estadio..."
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                    value={matchDetailsState.venue || ''}
+                    onChange={(e) => setMatchDetailsState(prev => ({ ...prev, venue: e.target.value }))}
+                  />
+                </div>
+              </div>
+
               {/* Goles/Marcador optional editor */}
               <div className="bg-slate-950/50 p-3 rounded-2xl border border-slate-800/80">
                 <span className="block text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-wide">Marcador (Opcional)</span>
@@ -4352,6 +4653,70 @@ export default function App() {
         </div>
       )}
 
+      {/* --- MODAL: PWA INSTALL INSTRUCTIONS --- */}
+      {showInstallModal && (
+        <div className="fixed inset-0 z-[120] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-sm p-6 relative overflow-hidden shadow-2xl">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-green-400 to-emerald-600" />
+            
+            <div className="flex justify-center mb-4">
+              <div className="w-14 h-14 bg-slate-950 border border-slate-800 rounded-2xl flex items-center justify-center shadow shadow-emerald-900">
+                <span className="text-xl font-black tracking-tighter">
+                  <span className="text-white">P</span>
+                  <span className="text-emerald-400">G</span>
+                </span>
+              </div>
+            </div>
+
+            <h3 className="text-lg font-extrabold text-white text-center mb-1">Crear Acceso Directo</h3>
+            <p className="text-xs text-slate-400 text-center mb-5 leading-relaxed">
+              Ten PlayGol en tu pantalla de inicio tal como una app nativa, abriendo directamente en la pantalla de acceso.
+            </p>
+
+            <div className="space-y-4 bg-slate-950/50 p-4 rounded-2xl border border-slate-850/60 mb-5">
+              {deviceOS === 'ios' ? (
+                <div className="space-y-3">
+                  <span className="block text-[10px] font-black text-amber-400 uppercase tracking-wider">Instrucciones para iPhone / iPad:</span>
+                  <ol className="list-decimal list-inside text-xs text-slate-300 space-y-2">
+                    <li>Presiona el botón de <strong className="text-white">Compartir</strong> <span className="inline-block p-1 bg-slate-800 rounded mx-0.5 text-[10px]">↑</span> en Safari.</li>
+                    <li>Desplázate hacia abajo y elige <strong className="text-white">"Agregar a inicio"</strong>.</li>
+                    <li>¡Listo! PlayGol se creará en tu pantalla principal.</li>
+                  </ol>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <span className="block text-[10px] font-black text-emerald-400 uppercase tracking-wider">Instrucciones para Android / Chrome:</span>
+                  <ol className="list-decimal list-inside text-xs text-slate-300 space-y-2">
+                    <li>Presiona el botón <strong className="text-white">Menú (tres puntos)</strong> arriba a la derecha de Chrome.</li>
+                    <li>Selecciona <strong className="text-white">"Instalar aplicación"</strong> o <strong className="text-white">"Agregar a la pantalla principal"</strong>.</li>
+                    <li>Confirma la instalación y se añadirá el ícono de PlayGol.</li>
+                  </ol>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2">
+              {deferredPrompt && (
+                <button
+                  type="button"
+                  onClick={handleInstallPWA}
+                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition cursor-pointer"
+                >
+                  Instalar Ahora
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowInstallModal(false)}
+                className="flex-1 py-2.5 bg-slate-850 hover:bg-slate-800 text-slate-300 text-xs font-bold rounded-xl transition cursor-pointer"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 
@@ -4504,10 +4869,20 @@ export default function App() {
                           <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">VS</span>
                         )}
                       </div>
-                      <div className="flex flex-wrap gap-1 justify-center max-w-[120px]">
+                      <div className="flex flex-wrap gap-1 justify-center max-w-[200px]">
                         {tour.type === 'GRUPOS' && match.group && (
                           <span className="text-[9px] font-extrabold text-emerald-400 bg-emerald-950/40 border border-emerald-900/30 px-1.5 py-0.5 rounded uppercase tracking-wider">
                             Grupo {match.group}
+                          </span>
+                        )}
+                        {match.time && (
+                          <span className="text-[9px] font-extrabold text-sky-400 bg-sky-950/40 border border-sky-900/30 px-1.5 py-0.5 rounded flex items-center gap-1 uppercase tracking-wider">
+                            <Clock className="w-2.5 h-2.5" /> {match.time}
+                          </span>
+                        )}
+                        {match.venue && (
+                          <span className="text-[9px] font-extrabold text-amber-400 bg-amber-950/40 border border-amber-900/30 px-1.5 py-0.5 rounded flex items-center gap-1 uppercase tracking-wider truncate max-w-[120px]" title={match.venue}>
+                            <MapPin className="w-2.5 h-2.5 flex-shrink-0" /> {match.venue}
                           </span>
                         )}
                       </div>
@@ -4662,6 +5037,22 @@ export default function App() {
               {m.played ? m.scoreB : '-'}
             </span>
           </div>
+
+          {/* Optional time/venue details */}
+          {(m.time || m.venue) && (
+            <div className="flex items-center justify-between gap-1 mt-1 border-t border-slate-900 pt-1 text-[8px] font-bold text-slate-500 uppercase tracking-wider">
+              {m.time && (
+                <span className="flex items-center gap-0.5 text-sky-400">
+                  <Clock className="w-2 h-2" /> {m.time}
+                </span>
+              )}
+              {m.venue && (
+                <span className="flex items-center gap-0.5 text-amber-400 truncate max-w-[80px]" title={m.venue}>
+                  <MapPin className="w-2 h-2" /> {m.venue}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       );
     };
