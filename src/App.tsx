@@ -2074,7 +2074,7 @@ export default function App() {
         <img 
           src={team.logoUrl} 
           alt={team.name} 
-          className={`${sizeClass} rounded-full object-contain border border-slate-700 bg-slate-900 p-0.5`}
+          className={`${sizeClass} rounded-full object-contain border border-slate-700 bg-slate-900 p-0.5 flex-shrink-0`}
         />
       );
     }
@@ -2090,7 +2090,7 @@ export default function App() {
 
     return (
       <div 
-        className={`${sizeClass} rounded-full flex items-center justify-center border-2 shadow-inner relative`}
+        className={`${sizeClass} rounded-full flex items-center justify-center border-2 shadow-inner relative flex-shrink-0`}
         style={{ 
           backgroundColor: team.primaryColor, 
           borderColor: team.secondaryColor || '#334155' 
@@ -2751,23 +2751,38 @@ export default function App() {
                                       match.played ? 'border-emerald-500/30 bg-emerald-950/5' : 'border-slate-800'
                                     } ${canEditCurrentTour ? 'hover:border-emerald-500/50 cursor-pointer' : ''}`}
                                   >
+                                    {(match.time || match.venue) && (
+                                      <div className="flex items-center gap-2 mb-2.5 pb-2 border-b border-slate-800/80 text-[10px] font-extrabold">
+                                        {match.time && (
+                                          <span className="flex items-center gap-1 text-sky-400 bg-sky-950/60 border border-sky-900/40 px-2 py-0.5 rounded-md">
+                                            <Clock className="w-3 h-3" /> {match.time}
+                                          </span>
+                                        )}
+                                        {match.venue && (
+                                          <span className="flex items-center gap-1 text-amber-400 truncate bg-amber-950/60 border border-amber-900/40 px-2 py-0.5 rounded-md" title={match.venue}>
+                                            <MapPin className="w-3 h-3 flex-shrink-0" /> {match.venue}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
+
                                     <div className="flex items-center justify-between">
                                       {/* Team A */}
                                       <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                                        {teamA ? renderTeamBadge(teamA, 'w-8 h-8') : (
-                                          <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                                        {teamA ? renderTeamBadge(teamA, 'w-8 h-8 md:w-9 md:h-9') : (
+                                          <div className="w-8 h-8 md:w-9 md:h-9 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center flex-shrink-0">
                                             <span className="text-[10px] font-bold text-slate-500">TBD</span>
                                           </div>
                                         )}
                                         <div className="min-w-0">
-                                          <span className="text-xs font-extrabold text-slate-300 block truncate">
+                                          <span className="text-xs md:text-sm font-black text-slate-100 block truncate">
                                             {teamA ? teamA.name : 'TBD'}
                                           </span>
                                         </div>
                                       </div>
 
                                       {/* Score */}
-                                      <div className="flex flex-col items-center gap-0.5 mx-4 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850">
+                                      <div className="flex flex-col items-center gap-0.5 mx-3 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850 flex-shrink-0">
                                         <div className="flex items-center gap-2">
                                           <span className="text-sm font-black text-white">{match.played ? match.scoreA : '-'}</span>
                                           <span className="text-slate-600 font-bold text-xs">:</span>
@@ -2783,12 +2798,12 @@ export default function App() {
                                       {/* Team B */}
                                       <div className="flex items-center gap-2.5 flex-1 justify-end min-w-0 text-right">
                                         <div className="min-w-0">
-                                          <span className="text-xs font-extrabold text-slate-300 block truncate">
+                                          <span className="text-xs md:text-sm font-black text-slate-100 block truncate">
                                             {teamB ? teamB.name : 'TBD'}
                                           </span>
                                         </div>
-                                        {teamB ? renderTeamBadge(teamB, 'w-8 h-8') : (
-                                          <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                                        {teamB ? renderTeamBadge(teamB, 'w-8 h-8 md:w-9 md:h-9') : (
+                                          <div className="w-8 h-8 md:w-9 md:h-9 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center flex-shrink-0">
                                             <span className="text-[10px] font-bold text-slate-500">TBD</span>
                                           </div>
                                         )}
@@ -4937,88 +4952,95 @@ export default function App() {
                   <div 
                     key={match.id}
                     onClick={() => handleOpenScoreModal(match)}
-                    className={`p-3.5 bg-slate-950 rounded-xl border border-slate-850 flex items-center justify-between transition ${
+                    className={`bg-slate-950 rounded-2xl border border-slate-850 overflow-hidden flex flex-col transition ${
                       canEditCurrentTour ? 'hover:border-emerald-500/50 cursor-pointer' : ''
                     }`}
                   >
-                    {/* Team A details */}
-                    <div className="flex items-center gap-2 flex-1 min-w-0">
-                      {teamA ? renderTeamBadge(teamA, 'w-7 h-7') : <div className="w-7 h-7 rounded-full bg-slate-800" />}
-                      <span className={`text-xs font-bold truncate ${match.played && (match.scoreA ?? 0) > (match.scoreB ?? 0) ? 'text-white' : 'text-slate-400'}`}>
-                        {teamA ? teamA.name : 'TBD'}
-                      </span>
-                    </div>
-
-                    {/* SCORE BOARD CONTAINER */}
-                    <div className="flex flex-col items-center gap-1 mx-2">
-                      <div className="px-3 py-1 bg-slate-900 rounded-lg border border-slate-800 text-center flex items-center gap-2">
-                        {match.played ? (
-                          <>
-                            <span className="text-sm font-black text-white">{match.scoreA}</span>
-                            <span className="text-[9px] font-bold text-slate-600">-</span>
-                            <span className="text-sm font-black text-white">{match.scoreB}</span>
-                          </>
-                        ) : (
-                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">VS</span>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap gap-1 justify-center max-w-[200px]">
+                    {/* Header Bar for Match Meta details (Time, Venue, Group) */}
+                    {(match.time || match.venue || (tour.type === 'GRUPOS' && match.group)) && (
+                      <div className="flex items-center justify-between gap-2 px-3.5 py-1.5 bg-slate-900/90 border-b border-slate-850/80 text-[10px] font-extrabold">
+                        <div className="flex items-center gap-2 overflow-hidden min-w-0">
+                          {match.time && (
+                            <span className="flex items-center gap-1 text-sky-400 font-extrabold flex-shrink-0 bg-sky-950/60 border border-sky-900/40 px-2 py-0.5 rounded-md">
+                              <Clock className="w-3 h-3" /> {match.time}
+                            </span>
+                          )}
+                          {match.venue && (
+                            <span className="flex items-center gap-1 text-amber-400 font-extrabold truncate bg-amber-950/60 border border-amber-900/40 px-2 py-0.5 rounded-md" title={match.venue}>
+                              <MapPin className="w-3 h-3 flex-shrink-0" /> {match.venue}
+                            </span>
+                          )}
+                        </div>
                         {tour.type === 'GRUPOS' && match.group && (
-                          <span className="text-[9px] font-extrabold text-emerald-400 bg-emerald-950/40 border border-emerald-900/30 px-1.5 py-0.5 rounded uppercase tracking-wider">
+                          <span className="text-[9px] font-black text-emerald-400 bg-emerald-950/80 border border-emerald-900/50 px-2 py-0.5 rounded-md uppercase tracking-wider flex-shrink-0">
                             Grupo {match.group}
                           </span>
                         )}
-                        {match.time && (
-                          <span className="text-[9px] font-extrabold text-sky-400 bg-sky-950/40 border border-sky-900/30 px-1.5 py-0.5 rounded flex items-center gap-1 uppercase tracking-wider">
-                            <Clock className="w-2.5 h-2.5" /> {match.time}
-                          </span>
-                        )}
-                        {match.venue && (
-                          <span className="text-[9px] font-extrabold text-amber-400 bg-amber-950/40 border border-amber-900/30 px-1.5 py-0.5 rounded flex items-center gap-1 uppercase tracking-wider truncate max-w-[120px]" title={match.venue}>
-                            <MapPin className="w-2.5 h-2.5 flex-shrink-0" /> {match.venue}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Team B details */}
-                    <div className="flex items-center gap-2 flex-1 justify-end min-w-0 text-right">
-                      <span className={`text-xs font-bold truncate ${match.played && (match.scoreB ?? 0) > (match.scoreA ?? 0) ? 'text-white' : 'text-slate-400'}`}>
-                        {teamB ? teamB.name : 'TBD'}
-                      </span>
-                      {teamB ? renderTeamBadge(teamB, 'w-7 h-7') : <div className="w-7 h-7 rounded-full bg-slate-800" />}
-                    </div>
-
-                    {/* Admin Action Buttons */}
-                    {canEditCurrentTour && (
-                      <div className="flex items-center ml-2 border-l border-slate-850 pl-2 gap-1 flex-shrink-0">
-                        {/* Edit Match Details Button */}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleOpenEditMatchDetails(match);
-                          }}
-                          className="text-slate-500 hover:text-emerald-400 p-1.5 rounded-lg hover:bg-slate-900 transition"
-                          title="Editar Partido"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                        </button>
-
-                        {/* Delete Match Button */}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteMatch(match.id);
-                          }}
-                          className="text-slate-500 hover:text-red-400 p-1.5 rounded-lg hover:bg-slate-900 transition"
-                          title="Eliminar Partido"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
                       </div>
                     )}
+
+                    {/* MAIN MATCH TEAMS & SCORE ROW */}
+                    <div className="p-3.5 flex items-center justify-between gap-2">
+                      {/* Team A details */}
+                      <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                        {teamA ? renderTeamBadge(teamA, 'w-8 h-8 md:w-9 md:h-9') : <div className="w-8 h-8 md:w-9 md:h-9 rounded-full bg-slate-800 flex-shrink-0" />}
+                        <span className={`text-xs md:text-sm font-black truncate ${match.played && (match.scoreA ?? 0) > (match.scoreB ?? 0) ? 'text-white' : 'text-slate-200'}`}>
+                          {teamA ? teamA.name : 'TBD'}
+                        </span>
+                      </div>
+
+                      {/* SCORE BOARD CONTAINER */}
+                      <div className="px-3.5 py-1.5 bg-slate-900 rounded-xl border border-slate-800 text-center flex items-center gap-2 flex-shrink-0 shadow-inner">
+                        {match.played ? (
+                          <>
+                            <span className="text-base font-black text-white">{match.scoreA}</span>
+                            <span className="text-xs font-bold text-slate-500">-</span>
+                            <span className="text-base font-black text-white">{match.scoreB}</span>
+                          </>
+                        ) : (
+                          <span className="text-xs font-black text-emerald-400 tracking-wider">VS</span>
+                        )}
+                      </div>
+
+                      {/* Team B details */}
+                      <div className="flex items-center gap-2.5 flex-1 justify-end min-w-0 text-right">
+                        <span className={`text-xs md:text-sm font-black truncate ${match.played && (match.scoreB ?? 0) > (match.scoreA ?? 0) ? 'text-white' : 'text-slate-200'}`}>
+                          {teamB ? teamB.name : 'TBD'}
+                        </span>
+                        {teamB ? renderTeamBadge(teamB, 'w-8 h-8 md:w-9 md:h-9') : <div className="w-8 h-8 md:w-9 md:h-9 rounded-full bg-slate-800 flex-shrink-0" />}
+                      </div>
+
+                      {/* Admin Action Buttons */}
+                      {canEditCurrentTour && (
+                        <div className="flex items-center ml-1 border-l border-slate-850 pl-1.5 gap-1 flex-shrink-0">
+                          {/* Edit Match Details Button */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenEditMatchDetails(match);
+                            }}
+                            className="text-slate-400 hover:text-emerald-400 p-1.5 rounded-lg hover:bg-slate-900 transition"
+                            title="Editar Partido"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Delete Match Button */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteMatch(match.id);
+                            }}
+                            className="text-slate-400 hover:text-red-400 p-1.5 rounded-lg hover:bg-slate-900 transition"
+                            title="Eliminar Partido"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 );
               })}
