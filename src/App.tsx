@@ -303,6 +303,9 @@ export default function App() {
 
   // Notifications & PWA Installation States
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [activeCloudNotif, setActiveCloudNotif] = useState<AppNotification | null>(null);
+  const previousNotifIdsRef = useRef<Set<string>>(new Set());
+  const isFirstNotifLoadRef = useRef(true);
   const [showNotificationsModal, setShowNotificationsModal] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
   const [showNotifDropdown, setShowNotifDropdown] = useState(false);
@@ -316,6 +319,25 @@ export default function App() {
   });
   const [deviceOS, setDeviceOS] = useState<'ios' | 'android' | 'other'>('other');
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+
+  // Auto-dismiss cloud notification after 8 seconds
+  useEffect(() => {
+    if (activeCloudNotif) {
+      const timer = setTimeout(() => {
+        setActiveCloudNotif(null);
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [activeCloudNotif]);
+
+  // Request browser Web Push notification permissions
+  const requestNotificationPermission = () => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().then(permission => {
+        console.log('Notification permission:', permission);
+      }).catch(err => console.error("Error requesting notification permission:", err));
+    }
+  };
 
   useEffect(() => {
     const ua = navigator.userAgent.toLowerCase();
@@ -508,6 +530,32 @@ export default function App() {
           list.push(d.data() as AppNotification);
         });
         list.sort((a, b) => b.timestamp - a.timestamp);
+
+        // Trigger floating Cloud Toast and native browser notification on new updates
+        if (!isFirstNotifLoadRef.current && list.length > 0) {
+          const newItems = list.filter(n => !previousNotifIdsRef.current.has(n.id));
+          if (newItems.length > 0) {
+            const newest = newItems[0];
+            setActiveCloudNotif(newest);
+
+            // Native Web Browser Notification (works even if tab is in background)
+            if ('Notification' in window && Notification.permission === 'granted') {
+              try {
+                new Notification('PlayGol - Actualización', {
+                  body: newest.text,
+                  icon: '/logo-pg.svg',
+                  tag: newest.id
+                });
+              } catch (e) {
+                console.error("Browser push error:", e);
+              }
+            }
+          }
+        } else {
+          isFirstNotifLoadRef.current = false;
+        }
+
+        previousNotifIdsRef.current = new Set(list.map(n => n.id));
         setNotifications(list);
       }, (error) => {
         console.error("Error in notifications Firestore subscription:", error);
@@ -2166,6 +2214,7 @@ export default function App() {
             <div className="relative">
               <button
                 onClick={() => {
+                  requestNotificationPermission();
                   setShowNotifDropdown(!showNotifDropdown);
                   if (notifications.length > 0) {
                     const maxTimestamp = Math.max(...notifications.map(n => n.timestamp));
@@ -2298,8 +2347,12 @@ export default function App() {
               <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none" />
               
               <div className="flex items-center gap-4">
-                <div className="w-14 h-14 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center text-3xl">
-                  {currentTour.type === 'LIGA' ? '🏆' : currentTour.type === 'GRUPOS' ? '👥' : '⚔️'}
+                <div className="w-14 h-14 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center text-3xl overflow-hidden p-0.5 flex-shrink-0">
+                  {currentTour.logoUrl ? (
+                    <img src={currentTour.logoUrl} alt={currentTour.name} className="w-full h-full object-cover rounded-xl" />
+                  ) : (
+                    currentTour.type === 'LIGA' ? '🏆' : currentTour.type === 'GRUPOS' ? '👥' : '⚔️'
+                  )}
                 </div>
                 <div>
                   <h2 className="text-2xl font-extrabold text-white">{currentTour.name}</h2>
@@ -4695,24 +4748,52 @@ export default function App() {
               )}
             </div>
 
-            <div className="flex gap-2">
-              {deferredPrompt && (
-                <button
-                  type="button"
-                  onClick={handleInstallPWA}
-                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition cursor-pointer"
-                >
-                  Instalar Ahora
-                </button>
-              )}
+            <div className="flex flex-col gap-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  requestNotificationPermission();
+                  handleInstallPWA();
+                }}
+                className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black rounded-xl transition cursor-pointer shadow-lg shadow-emerald-950 flex items-center justify-center gap-2"
+              >
+                <Smartphone className="w-4 h-4" />
+                <span>Crear Acceso Directo Directamente</span>
+              </button>
               <button
                 type="button"
                 onClick={() => setShowInstallModal(false)}
-                className="flex-1 py-2.5 bg-slate-850 hover:bg-slate-800 text-slate-300 text-xs font-bold rounded-xl transition cursor-pointer"
+                className="w-full py-2.5 bg-slate-850 hover:bg-slate-800 text-slate-300 text-xs font-bold rounded-xl transition cursor-pointer"
               >
                 Cerrar
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- FLOATING CLOUD TOAST NOTIFICATION (FLOTANTE EN FORMA DE NUBE) --- */}
+      {activeCloudNotif && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[300] w-[92%] max-w-md animate-in fade-in slide-in-from-top-5 duration-300">
+          <div className="bg-slate-900/95 border-2 border-emerald-500/60 rounded-[28px] p-4 shadow-[0_12px_40px_rgba(16,185,129,0.35)] backdrop-blur-md relative overflow-hidden flex items-start gap-3.5">
+            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-emerald-500/20 to-green-500/10 border border-emerald-500/40 flex items-center justify-center text-emerald-400 flex-shrink-0 mt-0.5 shadow-inner">
+              <Bell className="w-5 h-5 animate-bounce" />
+            </div>
+            <div className="flex-1 pr-5">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 bg-emerald-950/80 px-2.5 py-0.5 rounded-full border border-emerald-800/60 flex items-center gap-1">
+                  <span>☁️</span> Notificación Nube
+                </span>
+                <span className="text-[9px] text-slate-400">Ahora mismo</span>
+              </div>
+              <p className="text-xs font-bold text-slate-100 leading-relaxed">{activeCloudNotif.text}</p>
+            </div>
+            <button
+              onClick={() => setActiveCloudNotif(null)}
+              className="absolute top-2.5 right-2.5 w-7 h-7 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center text-xs transition cursor-pointer"
+            >
+              ✕
+            </button>
           </div>
         </div>
       )}
