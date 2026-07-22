@@ -359,8 +359,8 @@ export default function App() {
 
   const handleInstallPWA = async () => {
     if (deferredPrompt) {
-      deferredPrompt.prompt();
       try {
+        deferredPrompt.prompt();
         const { outcome } = await deferredPrompt.userChoice;
         if (outcome === 'accepted') {
           setDeferredPrompt(null);
@@ -369,6 +369,18 @@ export default function App() {
       } catch (err) {
         console.error("Install prompt error:", err);
       }
+    } else if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'PlayGol',
+          text: 'Instala el acceso directo de PlayGol en tu pantalla de inicio',
+          url: window.location.href
+        });
+      } catch (e) {
+        console.log('Share prompt dismissed', e);
+      }
+    } else {
+      alert("Para crear el ícono de PlayGol en tu pantalla de inicio, abre el menú de tu navegador y selecciona 'Agregar a la pantalla principal' o 'Instalar aplicación'.");
     }
   };
 
@@ -4758,7 +4770,7 @@ export default function App() {
                 className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black rounded-xl transition cursor-pointer shadow-lg shadow-emerald-950 flex items-center justify-center gap-2"
               >
                 <Smartphone className="w-4 h-4" />
-                <span>Crear Acceso Directo Directamente</span>
+                <span>Crear ícono en pantalla</span>
               </button>
               <button
                 type="button"
