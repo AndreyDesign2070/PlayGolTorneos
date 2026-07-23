@@ -996,11 +996,11 @@ export default function App() {
       scoreA: null,
       scoreB: null,
       played: false,
-      round: newMatchState.round.trim() || 'Fecha 1',
+      round: (newMatchState.round || '').trim() || 'Fecha 1',
       group: currentTour?.type === 'GRUPOS' ? newMatchState.group : undefined,
       freeTeamId: newMatchState.freeTeamId || undefined,
-      time: newMatchState.time.trim() || undefined,
-      venue: newMatchState.venue.trim() || undefined
+      time: newMatchState.time?.trim() || undefined,
+      venue: newMatchState.venue?.trim() || undefined
     };
 
     // Auto-ensure selected teams are present in currentTour.teams
@@ -2516,7 +2516,10 @@ export default function App() {
                             scoreA: '',
                             scoreB: '',
                             played: false,
-                            group: 'A'
+                            group: 'A',
+                            freeTeamId: '',
+                            time: '',
+                            venue: ''
                           });
                           setShowManualMatchModal(true);
                         }}
@@ -5012,7 +5015,10 @@ export default function App() {
                     scoreA: '',
                     scoreB: '',
                     played: false,
-                    group: 'A'
+                    group: 'A',
+                    freeTeamId: '',
+                    time: '',
+                    venue: ''
                   });
                   setShowManualMatchModal(true);
                 }}
