@@ -975,6 +975,10 @@ export default function App() {
   // --- MANUAL MATCH CREATION ---
   const handleCreateManualMatch = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!checkCanEdit(selectedTournamentId)) {
+      alert('No tienes permisos de administración para este torneo.');
+      return;
+    }
     if (!selectedTournamentId || !newMatchState.teamAId || !newMatchState.teamBId) {
       alert('Por favor selecciona ambos equipos.');
       return;
@@ -985,7 +989,7 @@ export default function App() {
     }
 
     const created: Match = {
-      id: `m-manual-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      id: `m-manual-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       tournamentId: selectedTournamentId,
       teamAId: newMatchState.teamAId,
       teamBId: newMatchState.teamBId,
@@ -999,10 +1003,24 @@ export default function App() {
       venue: newMatchState.venue.trim() || undefined
     };
 
-    saveState(teams, tournaments, [...matches, created]);
+    // Auto-ensure selected teams are present in currentTour.teams
+    let updatedTours = tournaments;
+    if (currentTour) {
+      const tourTeams = currentTour.teams || [];
+      const hasA = tourTeams.some(tt => tt.teamId === newMatchState.teamAId);
+      const hasB = tourTeams.some(tt => tt.teamId === newMatchState.teamBId);
+      if (!hasA || !hasB) {
+        const newTeams = [...tourTeams];
+        if (!hasA) newTeams.push({ teamId: newMatchState.teamAId, group: currentTour.type === 'GRUPOS' ? newMatchState.group : undefined });
+        if (!hasB) newTeams.push({ teamId: newMatchState.teamBId, group: currentTour.type === 'GRUPOS' ? newMatchState.group : undefined });
+        updatedTours = tournaments.map(t => t.id === currentTour.id ? { ...t, teams: newTeams } : t);
+      }
+    }
+
+    saveState(teams, updatedTours, [...matches, created]);
     
     // Trigger notification
-    const tour = tournaments.find(t => t.id === selectedTournamentId);
+    const tour = updatedTours.find(t => t.id === selectedTournamentId);
     const teamAName = teams.find(t => t.id === newMatchState.teamAId)?.name || 'Equipo A';
     const teamBName = teams.find(t => t.id === newMatchState.teamBId)?.name || 'Equipo B';
     if (tour) {
@@ -1336,6 +1354,10 @@ export default function App() {
   // --- MANUAL LLAVE CREATION ---
   const handleCreateManualLlave = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!checkCanEdit(selectedTournamentId)) {
+      alert('No tienes permisos de administración para este torneo.');
+      return;
+    }
     if (!selectedTournamentId || !manualLlaveState.teamAId || !manualLlaveState.teamBId) {
       alert('Por favor selecciona ambos equipos.');
       return;
@@ -1358,7 +1380,21 @@ export default function App() {
       isLlave: true
     };
 
-    saveState(teams, tournaments, [...matches, created]);
+    // Auto-ensure selected teams are present in currentTour.teams
+    let updatedTours = tournaments;
+    if (currentTour) {
+      const tourTeams = currentTour.teams || [];
+      const hasA = tourTeams.some(tt => tt.teamId === manualLlaveState.teamAId);
+      const hasB = tourTeams.some(tt => tt.teamId === manualLlaveState.teamBId);
+      if (!hasA || !hasB) {
+        const newTeams = [...tourTeams];
+        if (!hasA) newTeams.push({ teamId: manualLlaveState.teamAId });
+        if (!hasB) newTeams.push({ teamId: manualLlaveState.teamBId });
+        updatedTours = tournaments.map(t => t.id === currentTour.id ? { ...t, teams: newTeams } : t);
+      }
+    }
+
+    saveState(teams, updatedTours, [...matches, created]);
     setShowAddManualLlaveModal(false);
     setManualLlaveState({
       phaseName: 'Segunda Fase',
@@ -3737,12 +3773,21 @@ export default function App() {
                   onChange={(e) => setNewMatchState(prev => ({ ...prev, teamAId: e.target.value }))}
                 >
                   <option value="">-- Seleccionar Equipo --</option>
-                  {currentTour.teams
-                    .filter(tt => currentTour.type !== 'GRUPOS' || tt.group === newMatchState.group)
-                    .map(tt => {
-                      const team = teams.find(t => t.id === tt.teamId);
-                      return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
-                    })}
+                  {(() => {
+                    const tourTeams = currentTour.teams || [];
+                    let available = tourTeams
+                      .filter(tt => currentTour.type !== 'GRUPOS' || !tt.group || tt.group === newMatchState.group)
+                      .map(tt => teams.find(t => t.id === tt.teamId))
+                      .filter((t): t is Team => Boolean(t));
+
+                    if (available.length === 0) {
+                      available = teams;
+                    }
+
+                    return available.map(team => (
+                      <option key={team.id} value={team.id}>{team.name}</option>
+                    ));
+                  })()}
                 </select>
               </div>
 
@@ -3756,13 +3801,23 @@ export default function App() {
                   onChange={(e) => setNewMatchState(prev => ({ ...prev, teamBId: e.target.value }))}
                 >
                   <option value="">-- Seleccionar Equipo --</option>
-                  {currentTour.teams
-                    .filter(tt => currentTour.type !== 'GRUPOS' || tt.group === newMatchState.group)
-                    .filter(tt => tt.teamId !== newMatchState.teamAId)
-                    .map(tt => {
-                      const team = teams.find(t => t.id === tt.teamId);
-                      return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
-                    })}
+                  {(() => {
+                    const tourTeams = currentTour.teams || [];
+                    let available = tourTeams
+                      .filter(tt => currentTour.type !== 'GRUPOS' || !tt.group || tt.group === newMatchState.group)
+                      .map(tt => teams.find(t => t.id === tt.teamId))
+                      .filter((t): t is Team => Boolean(t));
+
+                    if (available.length === 0) {
+                      available = teams;
+                    }
+
+                    return available
+                      .filter(t => t.id !== newMatchState.teamAId)
+                      .map(team => (
+                        <option key={team.id} value={team.id}>{team.name}</option>
+                      ));
+                  })()}
                 </select>
               </div>
 
@@ -3781,12 +3836,21 @@ export default function App() {
                     onChange={(e) => setNewMatchState(prev => ({ ...prev, freeTeamId: e.target.value }))}
                   >
                     <option value="">-- Ninguno / Sin Equipo Libre --</option>
-                    {currentTour.teams
-                      .filter(tt => currentTour.type !== 'GRUPOS' || tt.group === newMatchState.group)
-                      .map(tt => {
-                        const team = teams.find(t => t.id === tt.teamId);
-                        return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
-                      })}
+                    {(() => {
+                      const tourTeams = currentTour.teams || [];
+                      let available = tourTeams
+                        .filter(tt => currentTour.type !== 'GRUPOS' || !tt.group || tt.group === newMatchState.group)
+                        .map(tt => teams.find(t => t.id === tt.teamId))
+                        .filter((t): t is Team => Boolean(t));
+
+                      if (available.length === 0) {
+                        available = teams;
+                      }
+
+                      return available.map(team => (
+                        <option key={team.id} value={team.id}>{team.name}</option>
+                      ));
+                    })()}
                   </select>
                 </div>
               )}
@@ -4354,13 +4418,24 @@ export default function App() {
                   onChange={(e) => setMatchDetailsState(prev => ({ ...prev, teamAId: e.target.value }))}
                 >
                   <option value="">-- Seleccionar Equipo --</option>
-                  {currentTour && (editingMatchDetails.round === 'LLAVES'
-                    ? currentTour.teams
-                    : currentTour.teams.filter(tt => currentTour.type !== 'GRUPOS' || tt.group === matchDetailsState.group)
-                  ).map(tt => {
-                    const team = teams.find(t => t.id === tt.teamId);
-                    return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
-                  })}
+                  {(() => {
+                    if (!currentTour) return null;
+                    const tourTeams = currentTour.teams || [];
+                    let available = (editingMatchDetails.round === 'LLAVES'
+                      ? tourTeams
+                      : tourTeams.filter(tt => currentTour.type !== 'GRUPOS' || !tt.group || tt.group === matchDetailsState.group)
+                    )
+                      .map(tt => teams.find(t => t.id === tt.teamId))
+                      .filter((t): t is Team => Boolean(t));
+
+                    if (available.length === 0) {
+                      available = teams;
+                    }
+
+                    return available.map(team => (
+                      <option key={team.id} value={team.id}>{team.name}</option>
+                    ));
+                  })()}
                 </select>
               </div>
 
@@ -4375,15 +4450,26 @@ export default function App() {
                   onChange={(e) => setMatchDetailsState(prev => ({ ...prev, teamBId: e.target.value }))}
                 >
                   <option value="">-- Seleccionar Equipo --</option>
-                  {currentTour && (editingMatchDetails.round === 'LLAVES'
-                    ? currentTour.teams
-                    : currentTour.teams.filter(tt => currentTour.type !== 'GRUPOS' || tt.group === matchDetailsState.group)
-                  )
-                    .filter(tt => tt.teamId !== matchDetailsState.teamAId)
-                    .map(tt => {
-                      const team = teams.find(t => t.id === tt.teamId);
-                      return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
-                    })}
+                  {(() => {
+                    if (!currentTour) return null;
+                    const tourTeams = currentTour.teams || [];
+                    let available = (editingMatchDetails.round === 'LLAVES'
+                      ? tourTeams
+                      : tourTeams.filter(tt => currentTour.type !== 'GRUPOS' || !tt.group || tt.group === matchDetailsState.group)
+                    )
+                      .map(tt => teams.find(t => t.id === tt.teamId))
+                      .filter((t): t is Team => Boolean(t));
+
+                    if (available.length === 0) {
+                      available = teams;
+                    }
+
+                    return available
+                      .filter(t => t.id !== matchDetailsState.teamAId)
+                      .map(team => (
+                        <option key={team.id} value={team.id}>{team.name}</option>
+                      ));
+                  })()}
                 </select>
               </div>
 
@@ -4658,10 +4744,20 @@ export default function App() {
                   onChange={(e) => setManualLlaveState(prev => ({ ...prev, teamAId: e.target.value }))}
                 >
                   <option value="">-- Seleccionar Equipo --</option>
-                  {currentTour.teams.map(tt => {
-                    const team = teams.find(t => t.id === tt.teamId);
-                    return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
-                  })}
+                  {(() => {
+                    const tourTeams = currentTour.teams || [];
+                    let available = tourTeams
+                      .map(tt => teams.find(t => t.id === tt.teamId))
+                      .filter((t): t is Team => Boolean(t));
+
+                    if (available.length === 0) {
+                      available = teams;
+                    }
+
+                    return available.map(team => (
+                      <option key={team.id} value={team.id}>{team.name}</option>
+                    ));
+                  })()}
                 </select>
               </div>
 
@@ -4675,12 +4771,22 @@ export default function App() {
                   onChange={(e) => setManualLlaveState(prev => ({ ...prev, teamBId: e.target.value }))}
                 >
                   <option value="">-- Seleccionar Equipo --</option>
-                  {currentTour.teams
-                    .filter(tt => tt.teamId !== manualLlaveState.teamAId)
-                    .map(tt => {
-                      const team = teams.find(t => t.id === tt.teamId);
-                      return team ? <option key={team.id} value={team.id}>{team.name}</option> : null;
-                    })}
+                  {(() => {
+                    const tourTeams = currentTour.teams || [];
+                    let available = tourTeams
+                      .map(tt => teams.find(t => t.id === tt.teamId))
+                      .filter((t): t is Team => Boolean(t));
+
+                    if (available.length === 0) {
+                      available = teams;
+                    }
+
+                    return available
+                      .filter(t => t.id !== manualLlaveState.teamAId)
+                      .map(team => (
+                        <option key={team.id} value={team.id}>{team.name}</option>
+                      ));
+                  })()}
                 </select>
               </div>
 
