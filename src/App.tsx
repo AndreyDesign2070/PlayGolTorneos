@@ -494,6 +494,39 @@ export default function App() {
       }
     };
 
+    const loadLocalFallback = async () => {
+      try {
+        const localTeams = localStorage.getItem('playgol_teams');
+        const localTours = localStorage.getItem('playgol_tournaments');
+        const localMatches = localStorage.getItem('playgol_matches');
+
+        if (localTeams && localTours && localMatches) {
+          const parsedTeams = JSON.parse(localTeams);
+          const parsedTours = JSON.parse(localTours);
+          const parsedMatches = JSON.parse(localMatches);
+          if (Array.isArray(parsedTeams) && parsedTeams.length > 0) {
+            setTeams(parsedTeams);
+            setTournaments(parsedTours);
+            setMatches(parsedMatches);
+            setIsLoading(false);
+            return;
+          }
+        }
+
+        const apiRes = await fetchWithRetry('/api/state', {}, 2, 300);
+        const apiData = await apiRes.json();
+        if (apiData && Array.isArray(apiData.teams) && apiData.teams.length > 0) {
+          setTeams(apiData.teams);
+          setTournaments(apiData.tournaments);
+          setMatches(apiData.matches);
+        }
+      } catch (e) {
+        console.warn("Fallback state load attempt:", e);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
     const setupFirebaseSync = () => {
       // 3. Subscribe to real-time changes in Firestore immediately & non-blockingly
       unsubTeams = onSnapshot(collection(db, "teams"), (snapshot) => {
@@ -504,8 +537,8 @@ export default function App() {
         setTeams(list);
         setIsLoading(false);
       }, (error) => {
-        console.error("Error in teams Firestore subscription:", error);
-        setIsLoading(false);
+        console.warn("Firestore teams subscription fallback:", error?.message || error);
+        loadLocalFallback();
       });
 
       unsubTournaments = onSnapshot(collection(db, "tournaments"), (snapshot) => {
@@ -520,8 +553,8 @@ export default function App() {
           seedFirestoreIfNeeded();
         }
       }, (error) => {
-        console.error("Error in tournaments Firestore subscription:", error);
-        setIsLoading(false);
+        console.warn("Firestore tournaments subscription fallback:", error?.message || error);
+        loadLocalFallback();
       });
 
       unsubMatches = onSnapshot(collection(db, "matches"), (snapshot) => {
@@ -532,8 +565,8 @@ export default function App() {
         setMatches(list);
         setIsLoading(false);
       }, (error) => {
-        console.error("Error in matches Firestore subscription:", error);
-        setIsLoading(false);
+        console.warn("Firestore matches subscription fallback:", error?.message || error);
+        loadLocalFallback();
       });
 
       unsubNotifications = onSnapshot(collection(db, "notifications"), (snapshot) => {
@@ -570,7 +603,7 @@ export default function App() {
         previousNotifIdsRef.current = new Set(list.map(n => n.id));
         setNotifications(list);
       }, (error) => {
-        console.error("Error in notifications Firestore subscription:", error);
+        console.warn("Firestore notifications subscription fallback:", error?.message || error);
       });
     };
 
