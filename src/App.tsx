@@ -496,6 +496,27 @@ export default function App() {
 
     const loadLocalFallback = async () => {
       try {
+        // 1. Try fetching current state from server first
+        const apiRes = await fetchWithRetry('/api/state', {}, 2, 300);
+        const apiData = await apiRes.json();
+
+        const serverHasData = apiData && Array.isArray(apiData.tournaments) && apiData.tournaments.length > 0;
+
+        if (serverHasData) {
+          setTeams(apiData.teams || []);
+          setTournaments(apiData.tournaments || []);
+          setMatches(apiData.matches || []);
+          if (Array.isArray(apiData.notifications) && apiData.notifications.length > 0) {
+            setNotifications(apiData.notifications);
+          }
+          localStorage.setItem('playgol_teams', JSON.stringify(apiData.teams || []));
+          localStorage.setItem('playgol_tournaments', JSON.stringify(apiData.tournaments || []));
+          localStorage.setItem('playgol_matches', JSON.stringify(apiData.matches || []));
+          setIsLoading(false);
+          return;
+        }
+
+        // 2. If server was empty, check if THIS device has localStorage data
         const localTeams = localStorage.getItem('playgol_teams');
         const localTours = localStorage.getItem('playgol_tournaments');
         const localMatches = localStorage.getItem('playgol_matches');
@@ -504,21 +525,26 @@ export default function App() {
           const parsedTeams = JSON.parse(localTeams);
           const parsedTours = JSON.parse(localTours);
           const parsedMatches = JSON.parse(localMatches);
-          if (Array.isArray(parsedTeams) && parsedTeams.length > 0) {
+
+          if (Array.isArray(parsedTours) && parsedTours.length > 0) {
             setTeams(parsedTeams);
             setTournaments(parsedTours);
             setMatches(parsedMatches);
+
+            // Sync this local data up to the server immediately so all visitor devices can see it!
+            await fetchWithRetry('/api/state', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                teams: parsedTeams,
+                tournaments: parsedTours,
+                matches: parsedMatches,
+                notifications: notifications || []
+              })
+            }, 3, 500);
             setIsLoading(false);
             return;
           }
-        }
-
-        const apiRes = await fetchWithRetry('/api/state', {}, 2, 300);
-        const apiData = await apiRes.json();
-        if (apiData && Array.isArray(apiData.teams) && apiData.teams.length > 0) {
-          setTeams(apiData.teams);
-          setTournaments(apiData.tournaments);
-          setMatches(apiData.matches);
         }
       } catch (e) {
         console.warn("Fallback state load attempt:", e);
@@ -534,7 +560,9 @@ export default function App() {
         snapshot.forEach(d => {
           list.push(d.data() as Team);
         });
-        setTeams(list);
+        if (list.length > 0) {
+          setTeams(list);
+        }
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore teams subscription fallback:", error?.message || error);
@@ -546,7 +574,11 @@ export default function App() {
         snapshot.forEach(d => {
           list.push(d.data() as Tournament);
         });
-        setTournaments(list);
+        if (list.length > 0) {
+          setTournaments(list);
+        } else {
+          loadLocalFallback();
+        }
         setIsLoading(false);
 
         if (snapshot.empty) {
@@ -562,7 +594,9 @@ export default function App() {
         snapshot.forEach(d => {
           list.push(d.data() as Match);
         });
-        setMatches(list);
+        if (list.length > 0) {
+          setMatches(list);
+        }
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore matches subscription fallback:", error?.message || error);
@@ -607,9 +641,38 @@ export default function App() {
       });
     };
 
+    loadLocalFallback();
     setupFirebaseSync();
 
+    // Periodic sync polling to ensure all visitors stay updated live even if Firestore quota is exceeded
+    const syncInterval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/state');
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.tournaments) && data.tournaments.length > 0) {
+            setTeams(data.teams || []);
+            setTournaments(data.tournaments || []);
+            setMatches(data.matches || []);
+            if (Array.isArray(data.notifications) && data.notifications.length > 0) {
+              setNotifications(prev => {
+                const existingIds = new Set(prev.map(n => n.id));
+                const newItems = (data.notifications as AppNotification[]).filter(n => !existingIds.has(n.id));
+                if (newItems.length > 0 && !isFirstNotifLoadRef.current) {
+                  setActiveCloudNotif(newItems[0]);
+                }
+                return data.notifications;
+              });
+            }
+          }
+        }
+      } catch (err) {
+        // silent sync catch
+      }
+    }, 4000);
+
     return () => {
+      clearInterval(syncInterval);
       unsubscribeAuth();
       unsubTeams();
       unsubTournaments();
@@ -754,7 +817,23 @@ export default function App() {
     localStorage.setItem('playgol_tournaments', JSON.stringify(cleanTournaments));
     localStorage.setItem('playgol_matches', JSON.stringify(cleanMatches));
 
-    // Exclusive real-time update of Firestore and Express on authorized editor sides
+    // ALWAYS sync state to Express server backend (data.json) so all visitors immediately see updates!
+    try {
+      await fetchWithRetry('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          teams: cleanTeams, 
+          tournaments: cleanTournaments, 
+          matches: cleanMatches,
+          notifications
+        })
+      }, 3, 500);
+    } catch (apiErr) {
+      console.warn("Could not sync state to Express server:", apiErr);
+    }
+
+    // Update Firestore if authorized
     const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
     if (isAuthorizedEditor) {
       try {
@@ -799,23 +878,7 @@ export default function App() {
           }
         }
       } catch (err) {
-        console.error("Error writing updates to Firebase Firestore:", err);
-      }
-
-      // Sync with Express backend to keep data.json always updated on the container
-      try {
-        await fetchWithRetry('/api/state', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            teams: cleanTeams, 
-            tournaments: cleanTournaments, 
-            matches: cleanMatches,
-            notifications
-          })
-        }, 3, 500);
-      } catch (apiErr) {
-        console.warn("Could not sync state to Express server, local changes are still safely saved to Firestore & LocalStorage:", apiErr);
+        console.warn("Firestore sync warning:", err);
       }
     }
   };
@@ -831,27 +894,28 @@ export default function App() {
     const updatedNotifications = [newNotif, ...notifications].slice(0, 50);
     setNotifications(updatedNotifications);
 
+    // Sync with Express backend
+    try {
+      await fetchWithRetry('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          teams,
+          tournaments,
+          matches,
+          notifications: updatedNotifications
+        })
+      }, 3, 500);
+    } catch (apiErr) {
+      console.warn("Could not sync notification state to Express server:", apiErr);
+    }
+
     const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
     if (isAuthorizedEditor) {
       try {
         await setDoc(doc(db, 'notifications', newNotif.id), newNotif);
       } catch (err) {
-        console.error("Error writing notification to Firestore:", err);
-      }
-
-      try {
-        await fetchWithRetry('/api/state', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            teams,
-            tournaments,
-            matches,
-            notifications: updatedNotifications
-          })
-        }, 3, 500);
-      } catch (apiErr) {
-        console.warn("Could not sync notification state to Express server:", apiErr);
+        console.warn("Error writing notification to Firestore:", err);
       }
     }
   };

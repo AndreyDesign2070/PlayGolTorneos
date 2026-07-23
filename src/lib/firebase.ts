@@ -1,6 +1,12 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { 
+  getFirestore, 
+  initializeFirestore, 
+  persistentLocalCache, 
+  persistentMultipleTabManager,
+  enableIndexedDbPersistence 
+} from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: "AIzaSyBc8UBBoFyK0A5H9B1xNyZKSD2ttroZhRs",
@@ -14,6 +20,20 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Firebase Authentication and Firestore
+// Initialize Firebase Authentication
 export const auth = getAuth(app);
-export const db = getFirestore(app, "ai-studio-playgol-184d974d-929a-4d47-812c-35e4e28a3f4a");
+
+// Initialize Firestore with offline persistent cache (IndexedDB) to minimize network reads
+let firestoreDb;
+try {
+  firestoreDb = initializeFirestore(app, {
+    localCache: persistentLocalCache({
+      tabManager: persistentMultipleTabManager()
+    })
+  }, "ai-studio-playgol-184d974d-929a-4d47-812c-35e4e28a3f4a");
+} catch (e) {
+  firestoreDb = getFirestore(app, "ai-studio-playgol-184d974d-929a-4d47-812c-35e4e28a3f4a");
+  enableIndexedDbPersistence(firestoreDb).catch(() => {});
+}
+
+export const db = firestoreDb;
