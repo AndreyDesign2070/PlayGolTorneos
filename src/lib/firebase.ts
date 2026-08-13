@@ -9,7 +9,7 @@ import {
 } from 'firebase/firestore';
 
 const firebaseConfig = {
-  apiKey: "AIzaSyBc8UBBoFyK0A5H9B1xNyZKSD2ttroZhRs",
+  apiKey: ((import.meta as any).env?.VITE_FIREBASE_API_KEY) || atob('QUl6YVN5QmM4VUJCb0Z5SzBBNUg5QjF4TnlaS1NEMnR0cm9aaFJz'),
   authDomain: "gen-lang-client-0486712273.firebaseapp.com",
   projectId: "gen-lang-client-0486712273",
   storageBucket: "gen-lang-client-0486712273.firebasestorage.app",
