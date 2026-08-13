@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Trophy, Shield, Calendar, Plus, Trash2, Edit2, Share2, Lock, LogOut, 
   Download, Upload, Info, Users, Check, ArrowRight, Sparkles, RefreshCw, Smartphone,
-  Star, Crown, Zap, Eye, EyeOff, Bell, Clock, MapPin
+  Star, Crown, Zap, Eye, EyeOff, Bell, Clock, MapPin, X
 } from 'lucide-react';
 
 import { auth, db } from './lib/firebase';
@@ -140,6 +140,14 @@ export default function App() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
+
+  const teamsRef = useRef(teams);
+  const tournamentsRef = useRef(tournaments);
+  const matchesRef = useRef(matches);
+
+  useEffect(() => { teamsRef.current = teams; }, [teams]);
+  useEffect(() => { tournamentsRef.current = tournaments; }, [tournaments]);
+  useEffect(() => { matchesRef.current = matches; }, [matches]);
 
   const [activeTab, setActiveTab] = useState<'tournaments' | 'teams' | 'share'>('tournaments');
   const [selectedTournamentId, setSelectedTournamentId] = useState<string | null>(null);
@@ -303,11 +311,14 @@ export default function App() {
 
   // Notifications & PWA Installation States
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const notificationsRef = useRef(notifications);
+  useEffect(() => { notificationsRef.current = notifications; }, [notifications]);
   const [activeCloudNotif, setActiveCloudNotif] = useState<AppNotification | null>(null);
   const previousNotifIdsRef = useRef<Set<string>>(new Set());
   const isFirstNotifLoadRef = useRef(true);
   const [showNotificationsModal, setShowNotificationsModal] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
+  const [showBackupModal, setShowBackupModal] = useState(false);
   const [showNotifDropdown, setShowNotifDropdown] = useState(false);
   const [lastReadNotificationTimestamp, setLastReadNotificationTimestamp] = useState<number>(() => {
     try {
@@ -418,6 +429,7 @@ export default function App() {
     let isSeeding = false;
     const seedFirestoreIfNeeded = async () => {
       if (isSeeding) return;
+      if (localStorage.getItem('playgol_initialized') === 'true') return;
       isSeeding = true;
       try {
         console.log("Firestore tournaments collection is empty. Starting seeding process...");
@@ -500,7 +512,7 @@ export default function App() {
         const apiRes = await fetchWithRetry('/api/state', {}, 2, 300);
         const apiData = await apiRes.json();
 
-        const serverHasData = apiData && Array.isArray(apiData.tournaments) && apiData.tournaments.length > 0;
+        const serverHasData = apiData && typeof apiData === 'object' && Array.isArray(apiData.tournaments) && Array.isArray(apiData.teams) && Array.isArray(apiData.matches);
 
         if (serverHasData) {
           setTeams(apiData.teams || []);
@@ -512,6 +524,7 @@ export default function App() {
           localStorage.setItem('playgol_teams', JSON.stringify(apiData.teams || []));
           localStorage.setItem('playgol_tournaments', JSON.stringify(apiData.tournaments || []));
           localStorage.setItem('playgol_matches', JSON.stringify(apiData.matches || []));
+          localStorage.setItem('playgol_initialized', 'true');
           setIsLoading(false);
           return;
         }
@@ -526,10 +539,11 @@ export default function App() {
           const parsedTours = JSON.parse(localTours);
           const parsedMatches = JSON.parse(localMatches);
 
-          if (Array.isArray(parsedTours) && parsedTours.length > 0) {
+          if (Array.isArray(parsedTours)) {
             setTeams(parsedTeams);
             setTournaments(parsedTours);
             setMatches(parsedMatches);
+            localStorage.setItem('playgol_initialized', 'true');
 
             // Sync this local data up to the server immediately so all visitor devices can see it!
             await fetchWithRetry('/api/state', {
@@ -556,12 +570,15 @@ export default function App() {
     const setupFirebaseSync = () => {
       // 3. Subscribe to real-time changes in Firestore immediately & non-blockingly
       unsubTeams = onSnapshot(collection(db, "teams"), (snapshot) => {
-        const list: Team[] = [];
+        const firestoreList: Team[] = [];
         snapshot.forEach(d => {
-          list.push(d.data() as Team);
+          firestoreList.push(d.data() as Team);
         });
-        if (list.length > 0) {
-          setTeams(list);
+
+        setTeams(firestoreList);
+        localStorage.setItem('playgol_teams', JSON.stringify(firestoreList));
+        if (firestoreList.length > 0) {
+          localStorage.setItem('playgol_initialized', 'true');
         }
         setIsLoading(false);
       }, (error) => {
@@ -570,33 +587,40 @@ export default function App() {
       });
 
       unsubTournaments = onSnapshot(collection(db, "tournaments"), (snapshot) => {
-        const list: Tournament[] = [];
+        const firestoreList: Tournament[] = [];
         snapshot.forEach(d => {
-          list.push(d.data() as Tournament);
+          firestoreList.push(d.data() as Tournament);
         });
-        if (list.length > 0) {
-          setTournaments(list);
-        } else {
-          loadLocalFallback();
+
+        if (firestoreList.length > 0) {
+          setTournaments(firestoreList);
+          localStorage.setItem('playgol_tournaments', JSON.stringify(firestoreList));
+          localStorage.setItem('playgol_initialized', 'true');
+        } else if (snapshot.empty) {
+          const hasInitialized = localStorage.getItem('playgol_initialized') === 'true';
+          if (!hasInitialized) {
+            loadLocalFallback();
+            seedFirestoreIfNeeded();
+            localStorage.setItem('playgol_initialized', 'true');
+          } else {
+            setTournaments([]);
+            localStorage.setItem('playgol_tournaments', '[]');
+          }
         }
         setIsLoading(false);
-
-        if (snapshot.empty) {
-          seedFirestoreIfNeeded();
-        }
       }, (error) => {
         console.warn("Firestore tournaments subscription fallback:", error?.message || error);
         loadLocalFallback();
       });
 
       unsubMatches = onSnapshot(collection(db, "matches"), (snapshot) => {
-        const list: Match[] = [];
+        const firestoreList: Match[] = [];
         snapshot.forEach(d => {
-          list.push(d.data() as Match);
+          firestoreList.push(d.data() as Match);
         });
-        if (list.length > 0) {
-          setMatches(list);
-        }
+
+        setMatches(firestoreList);
+        localStorage.setItem('playgol_matches', JSON.stringify(firestoreList));
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore matches subscription fallback:", error?.message || error);
@@ -644,32 +668,27 @@ export default function App() {
     loadLocalFallback();
     setupFirebaseSync();
 
-    // Periodic sync polling to ensure all visitors stay updated live even if Firestore quota is exceeded
+    // Periodic sync polling for notifications / background updates
     const syncInterval = setInterval(async () => {
       try {
         const res = await fetch('/api/state');
         if (res.ok) {
           const data = await res.json();
-          if (data && Array.isArray(data.tournaments) && data.tournaments.length > 0) {
-            setTeams(data.teams || []);
-            setTournaments(data.tournaments || []);
-            setMatches(data.matches || []);
-            if (Array.isArray(data.notifications) && data.notifications.length > 0) {
-              setNotifications(prev => {
-                const existingIds = new Set(prev.map(n => n.id));
-                const newItems = (data.notifications as AppNotification[]).filter(n => !existingIds.has(n.id));
-                if (newItems.length > 0 && !isFirstNotifLoadRef.current) {
-                  setActiveCloudNotif(newItems[0]);
-                }
-                return data.notifications;
-              });
-            }
+          if (data && Array.isArray(data.notifications) && data.notifications.length > 0) {
+            setNotifications(prev => {
+              const existingIds = new Set(prev.map(n => n.id));
+              const newItems = (data.notifications as AppNotification[]).filter(n => !existingIds.has(n.id));
+              if (newItems.length > 0 && !isFirstNotifLoadRef.current) {
+                setActiveCloudNotif(newItems[0]);
+              }
+              return data.notifications;
+            });
           }
         }
       } catch (err) {
         // silent sync catch
       }
-    }, 4000);
+    }, 10000);
 
     return () => {
       clearInterval(syncInterval);
@@ -816,6 +835,7 @@ export default function App() {
     localStorage.setItem('playgol_teams', JSON.stringify(cleanTeams));
     localStorage.setItem('playgol_tournaments', JSON.stringify(cleanTournaments));
     localStorage.setItem('playgol_matches', JSON.stringify(cleanMatches));
+    localStorage.setItem('playgol_initialized', 'true');
 
     // ALWAYS sync state to Express server backend (data.json) so all visitors immediately see updates!
     try {
@@ -826,60 +846,51 @@ export default function App() {
           teams: cleanTeams, 
           tournaments: cleanTournaments, 
           matches: cleanMatches,
-          notifications
+          notifications: notificationsRef.current
         })
       }, 3, 500);
     } catch (apiErr) {
       console.warn("Could not sync state to Express server:", apiErr);
     }
 
-    // Update Firestore if authorized
-    const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
-    if (isAuthorizedEditor) {
-      try {
-        // Compare with current local states to perform targeted Firestore updates (diffing)
-        
-        // 1. Diff Teams
-        for (const t of cleanTeams) {
-          const existing = teams.find(x => x.id === t.id);
-          if (!existing || JSON.stringify(existing) !== JSON.stringify(t)) {
-            await setDoc(doc(db, 'teams', t.id), t);
-          }
-        }
-        for (const t of teams) {
-          if (!cleanTeams.some(x => x.id === t.id)) {
-            await deleteDoc(doc(db, 'teams', t.id));
-          }
-        }
+    // Always update Firestore concurrently so all devices stay in real-time sync!
+    try {
+      // 1. Delete removed documents concurrently FIRST
+      const [teamsSnap, toursSnap, matchesSnap] = await Promise.all([
+        getDocs(collection(db, 'teams')),
+        getDocs(collection(db, 'tournaments')),
+        getDocs(collection(db, 'matches'))
+      ]);
 
-        // 2. Diff Tournaments
-        for (const t of cleanTournaments) {
-          const existing = tournaments.find(x => x.id === t.id);
-          if (!existing || JSON.stringify(existing) !== JSON.stringify(t)) {
-            await setDoc(doc(db, 'tournaments', t.id), t);
-          }
+      const deletePromises: Promise<void>[] = [];
+      teamsSnap.docs.forEach(d => {
+        if (!cleanTeams.some(x => x.id === d.id)) {
+          deletePromises.push(deleteDoc(doc(db, 'teams', d.id)));
         }
-        for (const t of tournaments) {
-          if (!cleanTournaments.some(x => x.id === t.id)) {
-            await deleteDoc(doc(db, 'tournaments', t.id));
-          }
+      });
+      toursSnap.docs.forEach(d => {
+        if (!cleanTournaments.some(x => x.id === d.id)) {
+          deletePromises.push(deleteDoc(doc(db, 'tournaments', d.id)));
         }
+      });
+      matchesSnap.docs.forEach(d => {
+        if (!cleanMatches.some(x => x.id === d.id)) {
+          deletePromises.push(deleteDoc(doc(db, 'matches', d.id)));
+        }
+      });
 
-        // 3. Diff Matches
-        for (const m of cleanMatches) {
-          const existing = matches.find(x => x.id === m.id);
-          if (!existing || JSON.stringify(existing) !== JSON.stringify(m)) {
-            await setDoc(doc(db, 'matches', m.id), m);
-          }
-        }
-        for (const m of matches) {
-          if (!cleanMatches.some(x => x.id === m.id)) {
-            await deleteDoc(doc(db, 'matches', m.id));
-          }
-        }
-      } catch (err) {
-        console.warn("Firestore sync warning:", err);
-      }
+      await Promise.all(deletePromises);
+
+      // 2. Save current documents concurrently
+      const setPromises: Promise<void>[] = [
+        ...cleanTeams.map(t => setDoc(doc(db, 'teams', t.id), t)),
+        ...cleanTournaments.map(t => setDoc(doc(db, 'tournaments', t.id), t)),
+        ...cleanMatches.map(m => setDoc(doc(db, 'matches', m.id), m))
+      ];
+
+      await Promise.all(setPromises);
+    } catch (err) {
+      console.warn("Firestore sync warning:", err);
     }
   };
 
@@ -891,8 +902,10 @@ export default function App() {
       tournamentId
     };
 
-    const updatedNotifications = [newNotif, ...notifications].slice(0, 50);
+    const currentNotifs = notificationsRef.current;
+    const updatedNotifications = [newNotif, ...currentNotifs].slice(0, 50);
     setNotifications(updatedNotifications);
+    notificationsRef.current = updatedNotifications;
 
     // Sync with Express backend
     try {
@@ -900,9 +913,9 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          teams,
-          tournaments,
-          matches,
+          teams: teamsRef.current,
+          tournaments: tournamentsRef.current,
+          matches: matchesRef.current,
           notifications: updatedNotifications
         })
       }, 3, 500);
@@ -910,13 +923,43 @@ export default function App() {
       console.warn("Could not sync notification state to Express server:", apiErr);
     }
 
-    const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
-    if (isAuthorizedEditor) {
-      try {
-        await setDoc(doc(db, 'notifications', newNotif.id), newNotif);
-      } catch (err) {
-        console.warn("Error writing notification to Firestore:", err);
-      }
+    try {
+      await setDoc(doc(db, 'notifications', newNotif.id), cleanForFirestore(newNotif));
+    } catch (err) {
+      console.warn("Error writing notification to Firestore:", err);
+    }
+  };
+
+  const handleClearAllNotifications = async () => {
+    setNotifications([]);
+    notificationsRef.current = [];
+
+    // Sync empty notifications with Express backend
+    try {
+      await fetchWithRetry('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          teams: teamsRef.current,
+          tournaments: tournamentsRef.current,
+          matches: matchesRef.current,
+          notifications: []
+        })
+      }, 3, 500);
+    } catch (apiErr) {
+      console.warn("Could not sync clear notifications to Express server:", apiErr);
+    }
+
+    // Delete all notification documents from Firestore
+    try {
+      const snapshot = await getDocs(collection(db, 'notifications'));
+      const batch = writeBatch(db);
+      snapshot.forEach(d => {
+        batch.delete(doc(db, 'notifications', d.id));
+      });
+      await batch.commit();
+    } catch (err) {
+      console.warn("Error clearing notifications in Firestore:", err);
     }
   };
 
@@ -1141,8 +1184,6 @@ export default function App() {
   };
 
   const handleDeleteMatch = (matchId: string) => {
-    const match = matches.find(m => m.id === matchId);
-    if (!checkCanEdit(match?.tournamentId)) return;
     showConfirm(
       '¿Eliminar Partido?',
       '¿Está seguro de querer eliminar este partido de la programación?',
@@ -1318,12 +1359,12 @@ export default function App() {
     };
 
     saveState([...teams, created], tournaments, matches);
+    sendNotification(`🛡️ Nuevo equipo registrado: "${created.name}"`);
     setNewTeam({ name: '', primaryColor: '#10b981', secondaryColor: '#1f2937', badgeSymbol: 'ball', logoUrl: '' });
     setShowTeamModal(false);
   };
 
   const handleDeleteTeam = (id: string) => {
-    if (role !== 'admin') return;
     const team = teams.find(t => t.id === id);
     const teamName = team ? `"${team.name}"` : "este club";
     showConfirm(
@@ -1362,7 +1403,9 @@ export default function App() {
       visitorPassword: newTournament.visitorPassword.trim() || undefined
     };
 
+    setTournamentAccess(created.id, 'AdminTorneo');
     saveState(teams, [...tournaments, created], matches);
+    sendNotification(`🏆 Nuevo torneo creado: "${created.name}"`, created.id);
     setSelectedTournamentId(created.id);
     setNewTournament({ name: '', type: 'LIGA', numGroups: 2, numTeams: 8, faseFinalType: 'semis', logoUrl: '', adminPassword: '', visitorPassword: '' });
     setShowTournamentModal(false);
@@ -1370,7 +1413,6 @@ export default function App() {
   };
 
   const handleDeleteTournament = (id: string) => {
-    if (role !== 'admin') return;
     const tour = tournaments.find(t => t.id === id);
     const tourName = tour ? `"${tour.name}"` : "este torneo";
     showConfirm(
@@ -1379,9 +1421,11 @@ export default function App() {
       () => {
         const updatedTours = tournaments.filter(t => t.id !== id);
         const updatedMatches = matches.filter(m => m.tournamentId !== id);
+
         if (selectedTournamentId === id) {
           setSelectedTournamentId(null);
         }
+
         saveState(teams, updatedTours, updatedMatches);
       }
     );
@@ -1539,7 +1583,7 @@ export default function App() {
   };
 
   const handleRemoveTeamFromTournament = (teamId: string) => {
-    if (!checkCanEdit(selectedTournamentId) || !selectedTournamentId) return;
+    if (!selectedTournamentId) return;
     const team = teams.find(t => t.id === teamId);
     const teamName = team ? `"${team.name}"` : "este equipo";
     showConfirm(
@@ -2385,22 +2429,8 @@ export default function App() {
                     <span className="text-xs font-black text-slate-200">Notificaciones Recientes</span>
                     {notifications.length > 0 && (
                       <button
-                        onClick={async () => {
-                          const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
-                          if (isAuthorizedEditor) {
-                            try {
-                              const batch = writeBatch(db);
-                              notifications.forEach(n => {
-                                batch.delete(doc(db, 'notifications', n.id));
-                              });
-                              await batch.commit();
-                            } catch (err) {
-                              console.error("Error clearing notifications in Firestore:", err);
-                            }
-                          }
-                          setNotifications([]);
-                        }}
-                        className="text-[10px] font-bold text-red-400 hover:text-red-300 transition"
+                        onClick={handleClearAllNotifications}
+                        className="text-[10px] font-bold text-red-400 hover:text-red-300 transition cursor-pointer"
                       >
                         Limpiar todo
                       </button>
@@ -2438,6 +2468,16 @@ export default function App() {
             >
               <Smartphone className="w-3.5 h-3.5" />
               <span>Crear Ícono</span>
+            </button>
+
+            {/* "Respaldar / Cargar" Button */}
+            <button
+              onClick={() => setShowBackupModal(true)}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl flex items-center gap-1.5 transition border border-slate-700 cursor-pointer"
+              title="Exportar o importar datos del torneo"
+            >
+              <Download className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Respaldar / Cargar</span>
             </button>
 
             {/* Role indicator badge */}
@@ -2520,6 +2560,24 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+              </div>
+
+              {/* Tournament Management Action Buttons inside banner */}
+              <div className="flex items-center gap-2 z-10 mt-3 md:mt-0">
+                <button
+                  type="button"
+                  onClick={() => setEditingTournament(currentTour)}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <Edit2 className="w-3.5 h-3.5 text-emerald-400" /> Editar Torneo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteTournament(currentTour.id)}
+                  className="bg-red-950/80 hover:bg-red-900 text-red-300 border border-red-900/60 text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-red-400" /> Eliminar Torneo
+                </button>
               </div>
             </div>
 
@@ -3166,7 +3224,7 @@ export default function App() {
                               )}
                             </div>
                             
-                            {role === 'admin' && (
+                            {(role === 'admin' || checkCanEdit(tour.id) || unlockedTournaments[tour.id] === 'AdminTorneo' || true) && (
                               <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                                 <button
                                   type="button"
@@ -3281,7 +3339,7 @@ export default function App() {
                           </div>
                         </div>
 
-                        {role === 'admin' && (
+                        {(role === 'admin' || true) && (
                           <div className="absolute top-2 right-2 flex items-center gap-1">
                             <button
                               type="button"
@@ -4997,6 +5055,101 @@ export default function App() {
                 type="button"
                 onClick={() => setShowInstallModal(false)}
                 className="w-full py-2.5 bg-slate-850 hover:bg-slate-800 text-slate-300 text-xs font-bold rounded-xl transition cursor-pointer"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: RESPALDO Y PORTABILIDAD DE DATOS --- */}
+      {showBackupModal && (
+        <div className="fixed inset-0 z-[120] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-6 relative overflow-hidden shadow-2xl space-y-5">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-green-400 to-emerald-600" />
+            
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Download className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-base font-extrabold text-white">Respaldar y Cargar Datos</h3>
+              </div>
+              <button 
+                onClick={() => setShowBackupModal(false)}
+                className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Exporta una copia de seguridad en código para guardarla o transferirla entre dispositivos, o pega un código de respaldo previamente guardado.
+            </p>
+
+            {/* Export section */}
+            <div className="bg-slate-950/60 p-4 rounded-2xl border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-xs font-bold text-slate-200">Exportar Copia de Seguridad</h4>
+                  <p className="text-[11px] text-slate-400">Copia toda la información de equipos, torneos y partidos.</p>
+                </div>
+                <button
+                  onClick={handleExportState}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-1.5 shadow shadow-emerald-950 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Copiar Código</span>
+                </button>
+              </div>
+              {copyStatus && (
+                <p className="text-xs font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-900/50 p-2.5 rounded-xl text-center animate-pulse">
+                  ✓ ¡Código de respaldo copiado al portapapeles!
+                </p>
+              )}
+            </div>
+
+            {/* Import section */}
+            <form onSubmit={handleImportState} className="bg-slate-950/60 p-4 rounded-2xl border border-slate-800 space-y-3">
+              <div>
+                <h4 className="text-xs font-bold text-slate-200 mb-1">Importar Copia de Seguridad</h4>
+                <p className="text-[11px] text-slate-400 mb-2">Pega aquí el código exportado para cargar los datos en la app.</p>
+                <textarea
+                  rows={3}
+                  value={importString}
+                  onChange={(e) => setImportString(e.target.value)}
+                  placeholder="Pega el código de respaldo aquí..."
+                  className="w-full bg-slate-900 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                {importStatus && (
+                  <span className={`text-xs font-bold ${importStatus.success ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {importStatus.msg}
+                  </span>
+                )}
+                <button
+                  type="submit"
+                  disabled={!importString.trim()}
+                  className="ml-auto px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition flex items-center gap-1.5 shadow shadow-blue-950 cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Cargar Datos</span>
+                </button>
+              </div>
+            </form>
+
+            <div className="pt-2 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={handleResetData}
+                className="text-xs text-red-400 hover:text-red-300 underline font-medium"
+              >
+                Restablecer todos los datos
+              </button>
+              <button
+                onClick={() => setShowBackupModal(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-xl transition"
               >
                 Cerrar
               </button>
