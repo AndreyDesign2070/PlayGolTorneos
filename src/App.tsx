@@ -592,20 +592,10 @@ export default function App() {
           firestoreList.push(d.data() as Tournament);
         });
 
+        setTournaments(firestoreList);
+        localStorage.setItem('playgol_tournaments', JSON.stringify(firestoreList));
         if (firestoreList.length > 0) {
-          setTournaments(firestoreList);
-          localStorage.setItem('playgol_tournaments', JSON.stringify(firestoreList));
           localStorage.setItem('playgol_initialized', 'true');
-        } else if (snapshot.empty) {
-          const hasInitialized = localStorage.getItem('playgol_initialized') === 'true';
-          if (!hasInitialized) {
-            loadLocalFallback();
-            seedFirestoreIfNeeded();
-            localStorage.setItem('playgol_initialized', 'true');
-          } else {
-            setTournaments([]);
-            localStorage.setItem('playgol_tournaments', '[]');
-          }
         }
         setIsLoading(false);
       }, (error) => {
@@ -668,27 +658,41 @@ export default function App() {
     loadLocalFallback();
     setupFirebaseSync();
 
-    // Periodic sync polling for notifications / background updates
+    // Fast hybrid polling sync (3 seconds) for all data to guarantee real-time updates even if WebSockets throttle
     const syncInterval = setInterval(async () => {
       try {
         const res = await fetch('/api/state');
         if (res.ok) {
           const data = await res.json();
-          if (data && Array.isArray(data.notifications) && data.notifications.length > 0) {
-            setNotifications(prev => {
-              const existingIds = new Set(prev.map(n => n.id));
-              const newItems = (data.notifications as AppNotification[]).filter(n => !existingIds.has(n.id));
-              if (newItems.length > 0 && !isFirstNotifLoadRef.current) {
-                setActiveCloudNotif(newItems[0]);
-              }
-              return data.notifications;
-            });
+          if (data && typeof data === 'object') {
+            if (Array.isArray(data.tournaments) && data.tournaments.length > 0) {
+              setTournaments(data.tournaments);
+              localStorage.setItem('playgol_tournaments', JSON.stringify(data.tournaments));
+            }
+            if (Array.isArray(data.teams) && data.teams.length > 0) {
+              setTeams(data.teams);
+              localStorage.setItem('playgol_teams', JSON.stringify(data.teams));
+            }
+            if (Array.isArray(data.matches) && data.matches.length > 0) {
+              setMatches(data.matches);
+              localStorage.setItem('playgol_matches', JSON.stringify(data.matches));
+            }
+            if (Array.isArray(data.notifications) && data.notifications.length > 0) {
+              setNotifications(prev => {
+                const existingIds = new Set(prev.map(n => n.id));
+                const newItems = (data.notifications as AppNotification[]).filter(n => !existingIds.has(n.id));
+                if (newItems.length > 0 && !isFirstNotifLoadRef.current) {
+                  setActiveCloudNotif(newItems[0]);
+                }
+                return data.notifications;
+              });
+            }
           }
         }
       } catch (err) {
         // silent sync catch
       }
-    }, 10000);
+    }, 3000);
 
     return () => {
       clearInterval(syncInterval);
@@ -881,11 +885,11 @@ export default function App() {
 
       await Promise.all(deletePromises);
 
-      // 2. Save current documents concurrently
+      // 2. Save current documents concurrently using clean JSON objects (zero undefined properties)
       const setPromises: Promise<void>[] = [
-        ...cleanTeams.map(t => setDoc(doc(db, 'teams', t.id), t)),
-        ...cleanTournaments.map(t => setDoc(doc(db, 'tournaments', t.id), t)),
-        ...cleanMatches.map(m => setDoc(doc(db, 'matches', m.id), m))
+        ...cleanTeams.map(t => setDoc(doc(db, 'teams', t.id), JSON.parse(JSON.stringify(t)))),
+        ...cleanTournaments.map(t => setDoc(doc(db, 'tournaments', t.id), JSON.parse(JSON.stringify(t)))),
+        ...cleanMatches.map(m => setDoc(doc(db, 'matches', m.id), JSON.parse(JSON.stringify(m))))
       ];
 
       await Promise.all(setPromises);
