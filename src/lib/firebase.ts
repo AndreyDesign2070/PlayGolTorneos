@@ -1,12 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { 
-  getFirestore, 
-  initializeFirestore, 
-  persistentLocalCache, 
-  persistentMultipleTabManager,
-  enableIndexedDbPersistence 
-} from 'firebase/firestore';
+import { getFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: ((import.meta as any).env?.VITE_FIREBASE_API_KEY) || atob('QUl6YVN5QmM4VUJCb0Z5SzBBNUg5QjF4TnlaS1NEMnR0cm9aaFJz'),
@@ -23,17 +17,6 @@ const app = initializeApp(firebaseConfig);
 // Initialize Firebase Authentication
 export const auth = getAuth(app);
 
-// Initialize Firestore with offline persistent cache (IndexedDB) to minimize network reads
-let firestoreDb;
-try {
-  firestoreDb = initializeFirestore(app, {
-    localCache: persistentLocalCache({
-      tabManager: persistentMultipleTabManager()
-    })
-  }, "ai-studio-playgol-184d974d-929a-4d47-812c-35e4e28a3f4a");
-} catch (e) {
-  firestoreDb = getFirestore(app, "ai-studio-playgol-184d974d-929a-4d47-812c-35e4e28a3f4a");
-  enableIndexedDbPersistence(firestoreDb).catch(() => {});
-}
+// Initialize Firestore targeting the applet database ID
+export const db = getFirestore(app, "ai-studio-playgol-184d974d-929a-4d47-812c-35e4e28a3f4a");
 
-export const db = firestoreDb;

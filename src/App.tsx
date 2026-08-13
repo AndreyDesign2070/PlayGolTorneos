@@ -429,7 +429,6 @@ export default function App() {
     let isSeeding = false;
     const seedFirestoreIfNeeded = async () => {
       if (isSeeding) return;
-      if (localStorage.getItem('playgol_initialized') === 'true') return;
       isSeeding = true;
       try {
         console.log("Firestore tournaments collection is empty. Starting seeding process...");
@@ -484,20 +483,18 @@ export default function App() {
         // Perform batch write to populate Firestore collections
         const batch = writeBatch(db);
         seedTeamsData.forEach(t => {
-          batch.set(doc(db, "teams", t.id), t);
+          batch.set(doc(db, "teams", t.id), JSON.parse(JSON.stringify(t)));
         });
         seedTournamentsData.forEach(t => {
-          batch.set(doc(db, "tournaments", t.id), t);
+          batch.set(doc(db, "tournaments", t.id), JSON.parse(JSON.stringify(t)));
         });
         seedMatchesData.forEach(m => {
-          const mDoc = { ...m };
-          if (mDoc.group === undefined) delete mDoc.group;
-          if (mDoc.bracketSlot === undefined) delete mDoc.bracketSlot;
-          if ((mDoc as any).overrideTeams === undefined) delete (mDoc as any).overrideTeams;
+          const mDoc = JSON.parse(JSON.stringify(m));
           batch.set(doc(db, "matches", m.id), mDoc);
         });
 
         await batch.commit();
+        localStorage.setItem('playgol_initialized', 'true');
         console.log("Firestore collections seeded successfully!");
       } catch (err) {
         console.error("Error in seedFirestoreIfNeeded:", err);
@@ -539,13 +536,13 @@ export default function App() {
           const parsedTours = JSON.parse(localTours);
           const parsedMatches = JSON.parse(localMatches);
 
-          if (Array.isArray(parsedTours)) {
+          if (Array.isArray(parsedTours) && parsedTours.length > 0) {
             setTeams(parsedTeams);
             setTournaments(parsedTours);
             setMatches(parsedMatches);
             localStorage.setItem('playgol_initialized', 'true');
 
-            // Sync this local data up to the server immediately so all visitor devices can see it!
+            // Sync this local data up to the server gracefully if available
             await fetchWithRetry('/api/state', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -555,7 +552,7 @@ export default function App() {
                 matches: parsedMatches,
                 notifications: notifications || []
               })
-            }, 3, 500);
+            }, 2, 300);
             setIsLoading(false);
             return;
           }
@@ -575,9 +572,9 @@ export default function App() {
           firestoreList.push(d.data() as Team);
         });
 
-        setTeams(firestoreList);
-        localStorage.setItem('playgol_teams', JSON.stringify(firestoreList));
         if (firestoreList.length > 0) {
+          setTeams(firestoreList);
+          localStorage.setItem('playgol_teams', JSON.stringify(firestoreList));
           localStorage.setItem('playgol_initialized', 'true');
         }
         setIsLoading(false);
@@ -592,10 +589,12 @@ export default function App() {
           firestoreList.push(d.data() as Tournament);
         });
 
-        setTournaments(firestoreList);
-        localStorage.setItem('playgol_tournaments', JSON.stringify(firestoreList));
         if (firestoreList.length > 0) {
+          setTournaments(firestoreList);
+          localStorage.setItem('playgol_tournaments', JSON.stringify(firestoreList));
           localStorage.setItem('playgol_initialized', 'true');
+        } else if (snapshot.empty) {
+          seedFirestoreIfNeeded();
         }
         setIsLoading(false);
       }, (error) => {
@@ -609,8 +608,10 @@ export default function App() {
           firestoreList.push(d.data() as Match);
         });
 
-        setMatches(firestoreList);
-        localStorage.setItem('playgol_matches', JSON.stringify(firestoreList));
+        if (firestoreList.length > 0) {
+          setMatches(firestoreList);
+          localStorage.setItem('playgol_matches', JSON.stringify(firestoreList));
+        }
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore matches subscription fallback:", error?.message || error);
