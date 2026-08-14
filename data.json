@@ -1514,5 +1514,11 @@
       "overrideTeams": false
     }
   ],
-  "notifications": []
+  "notifications": [
+    {
+      "id": "init-notif",
+      "text": "Sistema PlayGol en Vivo sincronizado y listo con 5 torneos y 40 clubes.",
+      "timestamp": 1786720019796
+    }
+  ]
 }

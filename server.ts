@@ -51,6 +51,31 @@ async function startServer() {
     }
   };
 
+  // Active SSE Clients for 1:1 real-time sync across computers, mobile, admins and visitors
+  const sseClients = new Set<express.Response>();
+
+  const broadcastState = (state: any, specificNotification?: any) => {
+    const payload = JSON.stringify({ state, notification: specificNotification, timestamp: Date.now() });
+    for (const client of sseClients) {
+      try {
+        client.write(`data: ${payload}\n\n`);
+      } catch (err) {
+        sseClients.delete(client);
+      }
+    }
+  };
+
+  // Heartbeat every 15 seconds to keep SSE streams alive on mobile networks
+  setInterval(() => {
+    for (const client of sseClients) {
+      try {
+        client.write(`: heartbeat\n\n`);
+      } catch (err) {
+        sseClients.delete(client);
+      }
+    }
+  }, 15000);
+
   // Static Assets for PWA and Standalone App shortcut icon
   app.get("/logo-pg.svg", (req, res) => {
     res.setHeader("Content-Type", "image/svg+xml");
@@ -83,27 +108,66 @@ async function startServer() {
   });
 
   // API Routes
+  // 1. Real-time Server-Sent Events (SSE) stream for instant 1:1 sync across devices
+  app.get("/api/events", (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    // Send initial state immediately upon connection
+    const initialState = readState();
+    res.write(`data: ${JSON.stringify({ state: initialState, timestamp: Date.now() })}\n\n`);
+
+    sseClients.add(res);
+
+    req.on("close", () => {
+      sseClients.delete(res);
+    });
+  });
+
+  // 2. Read full state
   app.get("/api/state", (req, res) => {
     const state = readState();
     res.json(state);
   });
 
+  // 3. Write and broadcast full state
   app.post("/api/state", (req, res) => {
-    const { teams, tournaments, matches, notifications } = req.body;
+    const { teams, tournaments, matches, notifications, notification } = req.body;
     if (!Array.isArray(teams) || !Array.isArray(tournaments) || !Array.isArray(matches)) {
       return res.status(400).json({ error: "Invalid state structure" });
     }
-    const success = writeState({ 
+    const fullState = { 
       teams, 
       tournaments, 
       matches, 
       notifications: Array.isArray(notifications) ? notifications : [] 
-    });
+    };
+    const success = writeState(fullState);
     if (success) {
-      res.json({ success: true });
+      // Broadcast real-time 1:1 update to all active devices/visitors immediately
+      broadcastState(fullState, notification);
+      res.json({ success: true, timestamp: Date.now() });
     } else {
       res.status(500).json({ error: "Failed to save state" });
     }
+  });
+
+  // 4. Send specific notification
+  app.post("/api/notify", (req, res) => {
+    const { notification } = req.body;
+    if (!notification || !notification.text) {
+      return res.status(400).json({ error: "Invalid notification payload" });
+    }
+    const state = readState();
+    const existingNotifs = Array.isArray(state.notifications) ? state.notifications : [];
+    const updatedNotifs = [notification, ...existingNotifs.filter((n: any) => n.id !== notification.id)].slice(0, 50);
+    state.notifications = updatedNotifs;
+    writeState(state);
+    broadcastState(state, notification);
+    res.json({ success: true, notifications: updatedNotifs });
   });
 
   // Vite middleware for development

@@ -19,6 +19,21 @@ import {
 } from 'firebase/auth';
 import { INITIAL_TEAMS, INITIAL_TOURNAMENTS, INITIAL_MATCHES } from './initialData';
 
+// Dynamic API backend URL resolver (resolves central cloud server across Netlify, PC, and mobile)
+export const getApiUrl = (endpoint: string): string => {
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_BACKEND_URL) {
+    return `${import.meta.env.VITE_BACKEND_URL.replace(/\/$/, '')}${cleanEndpoint}`;
+  }
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    if (host.includes('netlify.app') || host.includes('vercel.app') || host.includes('github.io')) {
+      return `https://ais-pre-f64j2s5bwy6buw2nsa374i-194677430859.us-east1.run.app${cleanEndpoint}`;
+    }
+  }
+  return cleanEndpoint;
+};
+
 // --- TYPES ---
 export interface Team {
   id: string;
@@ -396,11 +411,15 @@ export default function App() {
   const tourFileInputRef = useRef<HTMLInputElement>(null);
   const editTourFileInputRef = useRef<HTMLInputElement>(null);
 
-  // --- INITIAL SEED DATA & SYNC ENGINE & AUTH SYSTEM ---
+  // --- INITIAL SEED DATA & REAL-TIME 1:1 SYNC ENGINE ---
   useEffect(() => {
+    let isMounted = true;
+    let eventSource: EventSource | null = null;
+    let pollInterval: any = null;
+
     // 1. Listen to Auth State changes in Firebase Auth (optional background sync)
     const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
-      if (user) {
+      if (user && isMounted) {
         if (user.email === 'admin@playgol.com') {
           setRole('admin');
           sessionStorage.setItem('playgol_role', 'admin');
@@ -408,172 +427,119 @@ export default function App() {
           setRole('visitor');
           sessionStorage.setItem('playgol_role', 'visitor');
         }
-      } else {
-        // Sign in anonymously if not authenticated to ensure full Firestore realtime pipeline
-        signInAnonymously(auth).catch(() => {});
       }
     });
 
-    // 2. Load and Sync collections from Cloud Server and Firestore
-    let unsubTeams: () => void = () => {};
-    let unsubTournaments: () => void = () => {};
-    let unsubMatches: () => void = () => {};
-    let unsubNotifications: () => void = () => {};
+    // Unified function to apply incoming cloud updates to local state and trigger notifications
+    const applyIncomingState = (incoming: any, specificNotification?: any) => {
+      if (!incoming || !isMounted) return;
 
-    // Initial load from cloud backend
-    const loadFromCloudBackend = async () => {
-      try {
-        const res = await fetch('/api/state');
-        if (res.ok) {
-          const cloudData = await res.json();
-          if (cloudData.tournaments && cloudData.tournaments.length > 0) {
-            setTournaments(cloudData.tournaments);
-          }
-          if (cloudData.teams && cloudData.teams.length > 0) {
-            setTeams(cloudData.teams);
-          }
-          if (cloudData.matches && cloudData.matches.length > 0) {
-            setMatches(cloudData.matches);
-          }
-          if (cloudData.notifications && cloudData.notifications.length > 0) {
-            setNotifications(cloudData.notifications);
-          }
-        }
-      } catch (err) {
-        console.warn("Could not load from /api/state:", err);
-      } finally {
-        setIsLoading(false);
+      if (Array.isArray(incoming.tournaments) && incoming.tournaments.length > 0) {
+        setTournaments(incoming.tournaments);
       }
-    };
+      if (Array.isArray(incoming.teams) && incoming.teams.length > 0) {
+        setTeams(incoming.teams);
+      }
+      if (Array.isArray(incoming.matches) && incoming.matches.length > 0) {
+        setMatches(incoming.matches);
+      }
 
-    const checkAndSeedInitialData = async () => {
-      try {
-        const metaDocRef = doc(db, "metadata", "app_init");
-        const metaDoc = await getDoc(metaDocRef);
+      if (Array.isArray(incoming.notifications)) {
+        const sorted = [...incoming.notifications].sort((a: any, b: any) => b.timestamp - a.timestamp);
         
-        if (!metaDoc.exists()) {
-          // Check if tournaments collection already has data
-          const tourSnap = await getDocs(collection(db, "tournaments"));
-          if (tourSnap.empty) {
-            console.log("Firestore empty. Seeding initial tournaments, teams and matches...");
-            const batch = writeBatch(db);
-            INITIAL_TEAMS.forEach(t => batch.set(doc(db, "teams", t.id), t));
-            INITIAL_TOURNAMENTS.forEach(t => batch.set(doc(db, "tournaments", t.id), t));
-            INITIAL_MATCHES.forEach(m => {
-              const mDoc = { ...m };
-              if (mDoc.group === undefined) delete mDoc.group;
-              if (mDoc.bracketSlot === undefined) delete mDoc.bracketSlot;
-              if ((mDoc as any).overrideTeams === undefined) delete (mDoc as any).overrideTeams;
-              batch.set(doc(db, "matches", m.id), mDoc);
-            });
-            batch.set(metaDocRef, { initialized: true, seededAt: Date.now() });
-            await batch.commit();
-            console.log("Firestore initial seed finished!");
-          } else {
-            await setDoc(metaDocRef, { initialized: true, existingData: true });
-          }
-        }
-      } catch (err) {
-        console.warn("Check and seed initial data:", err);
-      }
-    };
+        // Trigger floating Cloud Toast and native browser notification on new incoming updates
+        if (!isFirstNotifLoadRef.current && (sorted.length > 0 || specificNotification)) {
+          const newItems = sorted.filter((n: any) => !previousNotifIdsRef.current.has(n.id));
+          const notifToShow = specificNotification || (newItems.length > 0 ? newItems[0] : null);
+          
+          if (notifToShow) {
+            setActiveCloudNotif(notifToShow);
 
-    const setupFirebaseSync = () => {
-      // 1. Teams listener
-      unsubTeams = onSnapshot(collection(db, "teams"), (snapshot) => {
-        const list: Team[] = [];
-        snapshot.forEach(d => {
-          list.push(d.data() as Team);
-        });
-        if (list.length > 0) {
-          setTeams(list);
-        }
-        setIsLoading(false);
-      }, (error) => {
-        console.warn("Firestore teams listener:", error);
-        setIsLoading(false);
-      });
-
-      // 2. Tournaments listener
-      unsubTournaments = onSnapshot(collection(db, "tournaments"), (snapshot) => {
-        const list: Tournament[] = [];
-        snapshot.forEach(d => {
-          list.push(d.data() as Tournament);
-        });
-        if (list.length > 0) {
-          setTournaments(list);
-        }
-        setIsLoading(false);
-      }, (error) => {
-        console.warn("Firestore tournaments listener:", error);
-        setIsLoading(false);
-      });
-
-      // 3. Matches listener
-      unsubMatches = onSnapshot(collection(db, "matches"), (snapshot) => {
-        const list: Match[] = [];
-        snapshot.forEach(d => {
-          list.push(d.data() as Match);
-        });
-        if (list.length > 0) {
-          setMatches(list);
-        }
-        setIsLoading(false);
-      }, (error) => {
-        console.warn("Firestore matches listener:", error);
-        setIsLoading(false);
-      });
-
-      // 4. Notifications listener
-      unsubNotifications = onSnapshot(collection(db, "notifications"), (snapshot) => {
-        const list: AppNotification[] = [];
-        snapshot.forEach(d => {
-          list.push(d.data() as AppNotification);
-        });
-        list.sort((a, b) => b.timestamp - a.timestamp);
-
-        // Trigger floating Cloud Toast and native browser notification on new incoming items
-        if (!isFirstNotifLoadRef.current && list.length > 0) {
-          const newItems = list.filter(n => !previousNotifIdsRef.current.has(n.id));
-          if (newItems.length > 0) {
-            const newest = newItems[0];
-            setActiveCloudNotif(newest);
-
-            if ('Notification' in window && Notification.permission === 'granted') {
+            if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
               try {
-                new Notification('PlayGol - Actualización', {
-                  body: newest.text,
+                new Notification('PlayGol - Actualización en Vivo', {
+                  body: notifToShow.text,
                   icon: '/logo-pg.svg',
-                  tag: newest.id
+                  tag: notifToShow.id
                 });
-              } catch (e) {
-                console.error("Browser push error:", e);
-              }
+              } catch (e) {}
             }
           }
         } else {
           isFirstNotifLoadRef.current = false;
         }
 
-        previousNotifIdsRef.current = new Set(list.map(n => n.id));
-        if (list.length > 0) {
-          setNotifications(list);
-        }
-      }, (error) => {
-        console.warn("Firestore notifications listener:", error);
-      });
+        previousNotifIdsRef.current = new Set(sorted.map((n: any) => n.id));
+        setNotifications(sorted);
+      }
+      setIsLoading(false);
     };
 
-    loadFromCloudBackend();
-    setupFirebaseSync();
-    checkAndSeedInitialData();
+    // 1. Initial State Fetch from Cloud Backend
+    const fetchLatestState = async () => {
+      try {
+        const res = await fetch(getApiUrl('/api/state'), { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          applyIncomingState(data);
+        }
+      } catch (err) {
+        console.warn("Could not fetch state from cloud:", err);
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    };
+
+    fetchLatestState();
+
+    // 2. Real-time Server-Sent Events (SSE) stream for instant 1:1 sync across devices
+    const connectSSE = () => {
+      if (typeof EventSource === 'undefined') return;
+      try {
+        const sseUrl = getApiUrl('/api/events');
+        eventSource = new EventSource(sseUrl);
+
+        eventSource.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload && payload.state) {
+              applyIncomingState(payload.state, payload.notification);
+            }
+          } catch (e) {}
+        };
+
+        eventSource.onerror = () => {
+          if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+          }
+          if (isMounted) {
+            setTimeout(connectSSE, 4000);
+          }
+        };
+      } catch (e) {
+        console.warn("SSE connection error:", e);
+      }
+    };
+
+    connectSSE();
+
+    // 3. Fallback polling every 3 seconds to guarantee 100% sync regardless of network disruptions
+    pollInterval = setInterval(() => {
+      if (isMounted) {
+        fetchLatestState();
+      }
+    }, 3000);
 
     return () => {
+      isMounted = false;
       unsubscribeAuth();
-      unsubTeams();
-      unsubTournaments();
-      unsubMatches();
-      unsubNotifications();
+      if (eventSource) {
+        eventSource.close();
+      }
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
     };
   }, []);
 
@@ -690,8 +656,14 @@ export default function App() {
     return updatedMatches;
   };
 
-  // --- SAVE PERSISTENCE ---
-  const saveState = async (updatedTeams: Team[], updatedTournaments: Tournament[], updatedMatches: Match[]) => {
+  // --- SAVE PERSISTENCE & REAL-TIME 1:1 CLOUD BROADCAST ---
+  const saveState = async (
+    updatedTeams: Team[], 
+    updatedTournaments: Tournament[], 
+    updatedMatches: Match[],
+    optionalNotifText?: string,
+    tournamentIdForNotif?: string
+  ) => {
     // Auto-advance any LLAVES in the tournament if a phase has been completed
     let processedMatches = [...updatedMatches];
     updatedTournaments.forEach(tour => {
@@ -708,83 +680,70 @@ export default function App() {
     setTournaments(cleanTournaments);
     setMatches(cleanMatches);
 
-    // Sync state to Express server backend if available
+    let updatedNotifs = notifications;
+    let createdNotif: AppNotification | undefined;
+
+    if (optionalNotifText) {
+      createdNotif = {
+        id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        text: optionalNotifText,
+        timestamp: Date.now(),
+        tournamentId: tournamentIdForNotif
+      };
+      updatedNotifs = [createdNotif, ...notifications].slice(0, 50);
+      setNotifications(updatedNotifs);
+    }
+
+    // 1. Sync state to Cloud Server backend and broadcast immediately via SSE to all active visitors/admins
     try {
-      fetch('/api/state', {
+      await fetch(getApiUrl('/api/state'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           teams: cleanTeams, 
           tournaments: cleanTournaments, 
           matches: cleanMatches,
-          notifications
+          notifications: updatedNotifs,
+          notification: createdNotif
         })
-      }).catch(() => {});
-    } catch {}
+      });
+    } catch (err) {
+      console.warn("Could not post state to cloud:", err);
+    }
 
-    // Synchronize directly with Firestore in atomic batches
+    // 2. Parallel background sync to Firestore
     try {
-      const [teamSnap, tourSnap, matchSnap] = await Promise.all([
-        getDocs(collection(db, 'teams')),
-        getDocs(collection(db, 'tournaments')),
-        getDocs(collection(db, 'matches'))
-      ]);
-
-      // 1. Teams Sync
       const batchTeams = writeBatch(db);
       cleanTeams.forEach(t => {
         batchTeams.set(doc(db, 'teams', t.id), t);
       });
-      teamSnap.forEach(d => {
-        if (!cleanTeams.some(t => t.id === d.id)) {
-          batchTeams.delete(d.ref);
-        }
-      });
 
-      // 2. Tournaments Sync
       const batchTours = writeBatch(db);
       cleanTournaments.forEach(t => {
         batchTours.set(doc(db, 'tournaments', t.id), t);
       });
-      tourSnap.forEach(d => {
-        if (!cleanTournaments.some(t => t.id === d.id)) {
-          batchTours.delete(d.ref);
-        }
-      });
-
-      // 3. Matches Sync (chunked into batches < 400)
-      const existingMatchIds = new Set(cleanMatches.map(m => m.id));
-      const deletedMatchDocs = matchSnap.docs.filter(d => !existingMatchIds.has(d.id));
-
-      const ops: { type: 'set' | 'delete', ref: any, data?: any }[] = [];
-      cleanMatches.forEach(m => {
-        ops.push({ type: 'set', ref: doc(db, 'matches', m.id), data: m });
-      });
-      deletedMatchDocs.forEach(d => {
-        ops.push({ type: 'delete', ref: d.ref });
-      });
 
       const matchBatchPromises = [];
-      for (let i = 0; i < ops.length; i += 400) {
-        const chunk = ops.slice(i, i + 400);
+      for (let i = 0; i < cleanMatches.length; i += 400) {
+        const chunk = cleanMatches.slice(i, i + 400);
         const matchBatch = writeBatch(db);
-        chunk.forEach(op => {
-          if (op.type === 'set') {
-            matchBatch.set(op.ref, op.data);
-          } else {
-            matchBatch.delete(op.ref);
-          }
+        chunk.forEach(m => {
+          matchBatch.set(doc(db, 'matches', m.id), m);
         });
         matchBatchPromises.push(matchBatch.commit());
       }
 
-      await Promise.all([
+      if (createdNotif) {
+        setDoc(doc(db, 'notifications', createdNotif.id), createdNotif).catch(() => {});
+      }
+
+      Promise.all([
         batchTeams.commit(),
         batchTours.commit(),
         ...matchBatchPromises
-      ]);
+      ]).catch(() => {});
     } catch (err) {
-      console.warn("Firestore sync warning:", err);
+      console.warn("Firestore sync background warning:", err);
     }
   };
 
@@ -796,26 +755,24 @@ export default function App() {
       tournamentId
     };
 
-    const updatedNotifications = [newNotif, ...notifications].slice(0, 50);
+    const updatedNotifications = [newNotif, ...notifications.filter(n => n.id !== newNotif.id)].slice(0, 50);
     setNotifications(updatedNotifications);
+    setActiveCloudNotif(newNotif);
 
-    // Sync with Express backend
+    // Broadcast through Cloud Server SSE endpoint
     try {
-      fetch('/api/state', {
+      await fetch(getApiUrl('/api/notify'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          teams,
-          tournaments,
-          matches,
-          notifications: updatedNotifications
-        })
-      }).catch(() => {});
-    } catch {}
+        body: JSON.stringify({ notification: newNotif })
+      });
+    } catch (err) {
+      console.warn("Error posting notification to cloud:", err);
+    }
 
-    // Save notification to Firestore
+    // Background Firestore notification write
     try {
-      await setDoc(doc(db, 'notifications', newNotif.id), newNotif);
+      setDoc(doc(db, 'notifications', newNotif.id), newNotif).catch(() => {});
     } catch (err) {
       console.warn("Error writing notification to Firestore:", err);
     }
@@ -824,6 +781,18 @@ export default function App() {
   const handleClearAllNotifications = async () => {
     setNotifications([]);
     setActiveCloudNotif(null);
+    try {
+      await fetch(getApiUrl('/api/state'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          teams,
+          tournaments,
+          matches,
+          notifications: []
+        })
+      });
+    } catch {}
     try {
       const snap = await getDocs(collection(db, 'notifications'));
       const batch = writeBatch(db);
