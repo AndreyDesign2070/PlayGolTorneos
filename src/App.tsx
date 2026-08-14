@@ -139,9 +139,9 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
-  const [teams, setTeams] = useState<Team[]>([]);
-  const [tournaments, setTournaments] = useState<Tournament[]>([]);
-  const [matches, setMatches] = useState<Match[]>([]);
+  const [teams, setTeams] = useState<Team[]>(() => INITIAL_TEAMS);
+  const [tournaments, setTournaments] = useState<Tournament[]>(() => INITIAL_TOURNAMENTS);
+  const [matches, setMatches] = useState<Match[]>(() => INITIAL_MATCHES);
 
   const [activeTab, setActiveTab] = useState<'tournaments' | 'teams' | 'share'>('tournaments');
   const [selectedTournamentId, setSelectedTournamentId] = useState<string | null>(null);
@@ -414,11 +414,37 @@ export default function App() {
       }
     });
 
-    // 2. Load and Sync collections from Firestore
+    // 2. Load and Sync collections from Cloud Server and Firestore
     let unsubTeams: () => void = () => {};
     let unsubTournaments: () => void = () => {};
     let unsubMatches: () => void = () => {};
     let unsubNotifications: () => void = () => {};
+
+    // Initial load from cloud backend
+    const loadFromCloudBackend = async () => {
+      try {
+        const res = await fetch('/api/state');
+        if (res.ok) {
+          const cloudData = await res.json();
+          if (cloudData.tournaments && cloudData.tournaments.length > 0) {
+            setTournaments(cloudData.tournaments);
+          }
+          if (cloudData.teams && cloudData.teams.length > 0) {
+            setTeams(cloudData.teams);
+          }
+          if (cloudData.matches && cloudData.matches.length > 0) {
+            setMatches(cloudData.matches);
+          }
+          if (cloudData.notifications && cloudData.notifications.length > 0) {
+            setNotifications(cloudData.notifications);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not load from /api/state:", err);
+      } finally {
+        setIsLoading(false);
+      }
+    };
 
     const checkAndSeedInitialData = async () => {
       try {
@@ -452,33 +478,6 @@ export default function App() {
       }
     };
 
-    const loadLocalFallback = () => {
-      try {
-        const localTeams = localStorage.getItem('playgol_teams');
-        const localTours = localStorage.getItem('playgol_tournaments');
-        const localMatches = localStorage.getItem('playgol_matches');
-        const localNotifs = localStorage.getItem('playgol_notifications');
-
-        if (localTeams && localTours && localMatches) {
-          setTeams(JSON.parse(localTeams));
-          setTournaments(JSON.parse(localTours));
-          setMatches(JSON.parse(localMatches));
-          if (localNotifs) setNotifications(JSON.parse(localNotifs));
-        } else {
-          setTeams(INITIAL_TEAMS);
-          setTournaments(INITIAL_TOURNAMENTS);
-          setMatches(INITIAL_MATCHES);
-          localStorage.setItem('playgol_teams', JSON.stringify(INITIAL_TEAMS));
-          localStorage.setItem('playgol_tournaments', JSON.stringify(INITIAL_TOURNAMENTS));
-          localStorage.setItem('playgol_matches', JSON.stringify(INITIAL_MATCHES));
-        }
-      } catch (e) {
-        console.warn("Fallback state load attempt:", e);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
     const setupFirebaseSync = () => {
       // 1. Teams listener
       unsubTeams = onSnapshot(collection(db, "teams"), (snapshot) => {
@@ -488,11 +487,11 @@ export default function App() {
         });
         if (list.length > 0) {
           setTeams(list);
-          localStorage.setItem('playgol_teams', JSON.stringify(list));
         }
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore teams listener:", error);
+        setIsLoading(false);
       });
 
       // 2. Tournaments listener
@@ -503,11 +502,11 @@ export default function App() {
         });
         if (list.length > 0) {
           setTournaments(list);
-          localStorage.setItem('playgol_tournaments', JSON.stringify(list));
         }
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore tournaments listener:", error);
+        setIsLoading(false);
       });
 
       // 3. Matches listener
@@ -518,11 +517,11 @@ export default function App() {
         });
         if (list.length > 0) {
           setMatches(list);
-          localStorage.setItem('playgol_matches', JSON.stringify(list));
         }
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore matches listener:", error);
+        setIsLoading(false);
       });
 
       // 4. Notifications listener
@@ -557,14 +556,15 @@ export default function App() {
         }
 
         previousNotifIdsRef.current = new Set(list.map(n => n.id));
-        setNotifications(list);
-        localStorage.setItem('playgol_notifications', JSON.stringify(list));
+        if (list.length > 0) {
+          setNotifications(list);
+        }
       }, (error) => {
         console.warn("Firestore notifications listener:", error);
       });
     };
 
-    loadLocalFallback();
+    loadFromCloudBackend();
     setupFirebaseSync();
     checkAndSeedInitialData();
 
@@ -708,11 +708,6 @@ export default function App() {
     setTournaments(cleanTournaments);
     setMatches(cleanMatches);
 
-    // LocalStorage fallback
-    localStorage.setItem('playgol_teams', JSON.stringify(cleanTeams));
-    localStorage.setItem('playgol_tournaments', JSON.stringify(cleanTournaments));
-    localStorage.setItem('playgol_matches', JSON.stringify(cleanMatches));
-
     // Sync state to Express server backend if available
     try {
       fetch('/api/state', {
@@ -803,7 +798,6 @@ export default function App() {
 
     const updatedNotifications = [newNotif, ...notifications].slice(0, 50);
     setNotifications(updatedNotifications);
-    localStorage.setItem('playgol_notifications', JSON.stringify(updatedNotifications));
 
     // Sync with Express backend
     try {
@@ -830,7 +824,6 @@ export default function App() {
   const handleClearAllNotifications = async () => {
     setNotifications([]);
     setActiveCloudNotif(null);
-    localStorage.removeItem('playgol_notifications');
     try {
       const snap = await getDocs(collection(db, 'notifications'));
       const batch = writeBatch(db);
@@ -2123,11 +2116,25 @@ export default function App() {
   const handleResetData = () => {
     showConfirm(
       '¿Restablecer Datos?',
-      '¿Está seguro de querer borrar todos los datos del torneo? Esta acción no se puede deshacer y reiniciará la aplicación.',
-      () => {
-        localStorage.removeItem('playgol_teams');
-        localStorage.removeItem('playgol_tournaments');
-        localStorage.removeItem('playgol_matches');
+      '¿Está seguro de querer borrar todos los datos del torneo? Esta acción no se puede deshacer y reiniciará la base de datos en la nube.',
+      async () => {
+        try {
+          const [teamSnap, tourSnap, matchSnap, notifSnap] = await Promise.all([
+            getDocs(collection(db, 'teams')),
+            getDocs(collection(db, 'tournaments')),
+            getDocs(collection(db, 'matches')),
+            getDocs(collection(db, 'notifications'))
+          ]);
+          const batch = writeBatch(db);
+          teamSnap.forEach(d => batch.delete(d.ref));
+          tourSnap.forEach(d => batch.delete(d.ref));
+          matchSnap.forEach(d => batch.delete(d.ref));
+          notifSnap.forEach(d => batch.delete(d.ref));
+          batch.delete(doc(db, "metadata", "app_init"));
+          await batch.commit();
+        } catch (err) {
+          console.error("Error resetting Firestore:", err);
+        }
         window.location.reload();
       },
       'Borrar Todo',
