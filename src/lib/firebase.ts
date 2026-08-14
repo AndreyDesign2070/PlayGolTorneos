@@ -1,12 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { 
-  getFirestore, 
-  initializeFirestore, 
-  persistentLocalCache, 
-  persistentMultipleTabManager,
-  enableIndexedDbPersistence 
-} from 'firebase/firestore';
+import { getFirestore } from 'firebase/firestore';
 
 const getApiKey = () => {
   if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_FIREBASE_API_KEY) {
@@ -20,7 +14,7 @@ const getApiKey = () => {
   if (typeof Buffer !== 'undefined') {
     return Buffer.from(encoded, 'base64').toString('utf-8');
   }
-  return "";
+  return "AIzaSyBc8UBBoFyK0A5H9B1xNyZKSD2ttroZhRs";
 };
 
 const firebaseConfig = {
@@ -38,17 +32,5 @@ const app = initializeApp(firebaseConfig);
 // Initialize Firebase Authentication
 export const auth = getAuth(app);
 
-// Initialize Firestore with offline persistent cache (IndexedDB) to minimize network reads
-let firestoreDb;
-try {
-  firestoreDb = initializeFirestore(app, {
-    localCache: persistentLocalCache({
-      tabManager: persistentMultipleTabManager()
-    })
-  }, "ai-studio-playgol-184d974d-929a-4d47-812c-35e4e28a3f4a");
-} catch (e) {
-  firestoreDb = getFirestore(app, "ai-studio-playgol-184d974d-929a-4d47-812c-35e4e28a3f4a");
-  enableIndexedDbPersistence(firestoreDb).catch(() => {});
-}
-
-export const db = firestoreDb;
+// Initialize Firestore
+export const db = getFirestore(app, "ai-studio-playgol-184d974d-929a-4d47-812c-35e4e28a3f4a");

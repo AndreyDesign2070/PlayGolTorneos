@@ -15,7 +15,7 @@ import {
   onSnapshot, collection, getDocs, getDoc, doc, setDoc, deleteDoc, writeBatch 
 } from 'firebase/firestore';
 import { 
-  onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut 
+  onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, signInAnonymously 
 } from 'firebase/auth';
 import { INITIAL_TEAMS, INITIAL_TOURNAMENTS, INITIAL_MATCHES } from './initialData';
 
@@ -408,6 +408,9 @@ export default function App() {
           setRole('visitor');
           sessionStorage.setItem('playgol_role', 'visitor');
         }
+      } else {
+        // Sign in anonymously if not authenticated to ensure full Firestore realtime pipeline
+        signInAnonymously(auth).catch(() => {});
       }
     });
 
@@ -483,8 +486,10 @@ export default function App() {
         snapshot.forEach(d => {
           list.push(d.data() as Team);
         });
-        setTeams(list);
-        localStorage.setItem('playgol_teams', JSON.stringify(list));
+        if (list.length > 0) {
+          setTeams(list);
+          localStorage.setItem('playgol_teams', JSON.stringify(list));
+        }
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore teams listener:", error);
@@ -496,8 +501,10 @@ export default function App() {
         snapshot.forEach(d => {
           list.push(d.data() as Tournament);
         });
-        setTournaments(list);
-        localStorage.setItem('playgol_tournaments', JSON.stringify(list));
+        if (list.length > 0) {
+          setTournaments(list);
+          localStorage.setItem('playgol_tournaments', JSON.stringify(list));
+        }
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore tournaments listener:", error);
@@ -509,8 +516,10 @@ export default function App() {
         snapshot.forEach(d => {
           list.push(d.data() as Match);
         });
-        setMatches(list);
-        localStorage.setItem('playgol_matches', JSON.stringify(list));
+        if (list.length > 0) {
+          setMatches(list);
+          localStorage.setItem('playgol_matches', JSON.stringify(list));
+        }
         setIsLoading(false);
       }, (error) => {
         console.warn("Firestore matches listener:", error);
@@ -556,39 +565,10 @@ export default function App() {
     };
 
     loadLocalFallback();
-    checkAndSeedInitialData().then(() => {
-      setupFirebaseSync();
-    });
-
-    // Periodic sync polling to ensure all visitors stay updated live even if Firestore quota is exceeded
-    const syncInterval = setInterval(async () => {
-      try {
-        const res = await fetch('/api/state');
-        if (res.ok) {
-          const data = await res.json();
-          if (data && Array.isArray(data.tournaments) && data.tournaments.length > 0) {
-            setTeams(data.teams || []);
-            setTournaments(data.tournaments || []);
-            setMatches(data.matches || []);
-            if (Array.isArray(data.notifications) && data.notifications.length > 0) {
-              setNotifications(prev => {
-                const existingIds = new Set(prev.map(n => n.id));
-                const newItems = (data.notifications as AppNotification[]).filter(n => !existingIds.has(n.id));
-                if (newItems.length > 0 && !isFirstNotifLoadRef.current) {
-                  setActiveCloudNotif(newItems[0]);
-                }
-                return data.notifications;
-              });
-            }
-          }
-        }
-      } catch (err) {
-        // silent sync catch
-      }
-    }, 4000);
+    setupFirebaseSync();
+    checkAndSeedInitialData();
 
     return () => {
-      clearInterval(syncInterval);
       unsubscribeAuth();
       unsubTeams();
       unsubTournaments();
@@ -749,8 +729,13 @@ export default function App() {
 
     // Synchronize directly with Firestore in atomic batches
     try {
+      const [teamSnap, tourSnap, matchSnap] = await Promise.all([
+        getDocs(collection(db, 'teams')),
+        getDocs(collection(db, 'tournaments')),
+        getDocs(collection(db, 'matches'))
+      ]);
+
       // 1. Teams Sync
-      const teamSnap = await getDocs(collection(db, 'teams'));
       const batchTeams = writeBatch(db);
       cleanTeams.forEach(t => {
         batchTeams.set(doc(db, 'teams', t.id), t);
@@ -760,10 +745,8 @@ export default function App() {
           batchTeams.delete(d.ref);
         }
       });
-      await batchTeams.commit();
 
       // 2. Tournaments Sync
-      const tourSnap = await getDocs(collection(db, 'tournaments'));
       const batchTours = writeBatch(db);
       cleanTournaments.forEach(t => {
         batchTours.set(doc(db, 'tournaments', t.id), t);
@@ -773,10 +756,8 @@ export default function App() {
           batchTours.delete(d.ref);
         }
       });
-      await batchTours.commit();
 
       // 3. Matches Sync (chunked into batches < 400)
-      const matchSnap = await getDocs(collection(db, 'matches'));
       const existingMatchIds = new Set(cleanMatches.map(m => m.id));
       const deletedMatchDocs = matchSnap.docs.filter(d => !existingMatchIds.has(d.id));
 
@@ -788,6 +769,7 @@ export default function App() {
         ops.push({ type: 'delete', ref: d.ref });
       });
 
+      const matchBatchPromises = [];
       for (let i = 0; i < ops.length; i += 400) {
         const chunk = ops.slice(i, i + 400);
         const matchBatch = writeBatch(db);
@@ -798,8 +780,14 @@ export default function App() {
             matchBatch.delete(op.ref);
           }
         });
-        await matchBatch.commit();
+        matchBatchPromises.push(matchBatch.commit());
       }
+
+      await Promise.all([
+        batchTeams.commit(),
+        batchTours.commit(),
+        ...matchBatchPromises
+      ]);
     } catch (err) {
       console.warn("Firestore sync warning:", err);
     }
