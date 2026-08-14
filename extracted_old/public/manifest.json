@@ -1,0 +1,18 @@
+{
+  "short_name": "PlayGol",
+  "name": "PlayGol - Torneos de Fútbol",
+  "description": "Administrador de Torneos de Fútbol, Fixtures, Llaves y Resultados",
+  "icons": [
+    {
+      "src": "/logo-pg.svg",
+      "type": "image/svg+xml",
+      "sizes": "192x192 512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "display": "standalone",
+  "orientation": "portrait"
+}

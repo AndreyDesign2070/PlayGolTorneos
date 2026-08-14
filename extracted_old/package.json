@@ -18,10 +18,8 @@
     "firebase": "^12.16.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
-    "node-unrar-js": "^2.0.2",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
-    "unrar-js": "^0.2.3",
     "vite": "^6.2.3"
   },
   "devDependencies": {

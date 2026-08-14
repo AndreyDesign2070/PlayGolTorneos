@@ -17,7 +17,6 @@ import {
 import { 
   onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut 
 } from 'firebase/auth';
-import { INITIAL_TEAMS, INITIAL_TOURNAMENTS, INITIAL_MATCHES } from './initialData';
 
 // --- TYPES ---
 export interface Team {
@@ -66,7 +65,6 @@ export interface Match {
   penaltiesB?: number | null;
   time?: string;
   venue?: string;
-  overrideTeams?: any;
 }
 
 export interface AppNotification {
@@ -440,11 +438,35 @@ export default function App() {
           console.warn("Could not fetch state from Express server to seed, falling back gracefully:", e);
         }
 
-        // Fallback to initial seed from initialData.ts if the server didn't have data
+        // Fallback to hardcoded seed if the server didn't have data
         if (seedTeamsData.length === 0) {
-          seedTeamsData = INITIAL_TEAMS;
-          seedTournamentsData = INITIAL_TOURNAMENTS;
-          seedMatchesData = INITIAL_MATCHES;
+          seedTeamsData = [
+            { id: 't1', name: 'Alianza FC', primaryColor: '#1d4ed8', secondaryColor: '#ffffff', badgeSymbol: 'shield' },
+            { id: 't2', name: 'Deportivo Oro', primaryColor: '#eab308', secondaryColor: '#1e293b', badgeSymbol: 'crown' },
+            { id: 't3', name: 'Real Volcán', primaryColor: '#dc2626', secondaryColor: '#000000', badgeSymbol: 'flame' },
+            { id: 't4', name: 'Verde United', primaryColor: '#059669', secondaryColor: '#ffffff', badgeSymbol: 'ball' },
+            { id: 't5', name: 'Estrella FC', primaryColor: '#8b5cf6', secondaryColor: '#fef08a', badgeSymbol: 'star' },
+            { id: 't6', name: 'Relámpago FC', primaryColor: '#0ea5e9', secondaryColor: '#172554', badgeSymbol: 'zap' }
+          ];
+
+          seedTournamentsData = [
+            {
+              id: 'tour1',
+              name: 'Superliga PlayGol',
+              type: 'LIGA',
+              teams: seedTeamsData.map(t => ({ teamId: t.id }))
+            }
+          ];
+
+          const generated = generateRoundRobinMatches('tour1', seedTeamsData.map(t => t.id));
+          generated.forEach((m, idx) => {
+            if (idx < 5) {
+              m.scoreA = Math.floor(Math.random() * 4);
+              m.scoreB = Math.floor(Math.random() * 4);
+              m.played = true;
+            }
+            seedMatchesData.push(m);
+          });
         }
 
         // Perform batch write to populate Firestore collections
@@ -504,7 +526,7 @@ export default function App() {
           const parsedTours = JSON.parse(localTours);
           const parsedMatches = JSON.parse(localMatches);
 
-          if (Array.isArray(parsedTours) && parsedTours.length >= INITIAL_TOURNAMENTS.length) {
+          if (Array.isArray(parsedTours) && parsedTours.length > 0) {
             setTeams(parsedTeams);
             setTournaments(parsedTours);
             setMatches(parsedMatches);
@@ -520,15 +542,6 @@ export default function App() {
                 notifications: notifications || []
               })
             }, 3, 500);
-            setIsLoading(false);
-            return;
-          } else {
-            setTeams(INITIAL_TEAMS);
-            setTournaments(INITIAL_TOURNAMENTS);
-            setMatches(INITIAL_MATCHES);
-            localStorage.setItem('playgol_teams', JSON.stringify(INITIAL_TEAMS));
-            localStorage.setItem('playgol_tournaments', JSON.stringify(INITIAL_TOURNAMENTS));
-            localStorage.setItem('playgol_matches', JSON.stringify(INITIAL_MATCHES));
             setIsLoading(false);
             return;
           }
@@ -549,7 +562,6 @@ export default function App() {
         });
         if (list.length > 0) {
           setTeams(list);
-          localStorage.setItem('playgol_teams', JSON.stringify(list));
         }
         setIsLoading(false);
       }, (error) => {
@@ -564,13 +576,12 @@ export default function App() {
         });
         if (list.length > 0) {
           setTournaments(list);
-          localStorage.setItem('playgol_tournaments', JSON.stringify(list));
         } else {
           loadLocalFallback();
         }
         setIsLoading(false);
 
-        if (snapshot.empty || snapshot.docs.length < INITIAL_TOURNAMENTS.length) {
+        if (snapshot.empty) {
           seedFirestoreIfNeeded();
         }
       }, (error) => {
@@ -585,7 +596,6 @@ export default function App() {
         });
         if (list.length > 0) {
           setMatches(list);
-          localStorage.setItem('playgol_matches', JSON.stringify(list));
         }
         setIsLoading(false);
       }, (error) => {
