@@ -18,6 +18,7 @@ import {
   onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, signInAnonymously 
 } from 'firebase/auth';
 import { INITIAL_TEAMS, INITIAL_TOURNAMENTS, INITIAL_MATCHES } from './initialData';
+import { realtimeSync, SyncPayload } from './lib/realtimeSync';
 
 // Dynamic API backend URL resolver (resolves central cloud server across Netlify, PC, and mobile)
 export const getApiUrl = (endpoint: string): string => {
@@ -154,9 +155,36 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
-  const [teams, setTeams] = useState<Team[]>(() => INITIAL_TEAMS);
-  const [tournaments, setTournaments] = useState<Tournament[]>(() => INITIAL_TOURNAMENTS);
-  const [matches, setMatches] = useState<Match[]>(() => INITIAL_MATCHES);
+  const [teams, setTeams] = useState<Team[]>(() => {
+    try {
+      const cached = localStorage.getItem('playgol_teams_cache');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return INITIAL_TEAMS;
+  });
+  const [tournaments, setTournaments] = useState<Tournament[]>(() => {
+    try {
+      const cached = localStorage.getItem('playgol_tournaments_cache');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return INITIAL_TOURNAMENTS;
+  });
+  const [matches, setMatches] = useState<Match[]>(() => {
+    try {
+      const cached = localStorage.getItem('playgol_matches_cache');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return INITIAL_MATCHES;
+  });
 
   const [activeTab, setActiveTab] = useState<'tournaments' | 'teams' | 'share'>('tournaments');
   const [selectedTournamentId, setSelectedTournamentId] = useState<string | null>(null);
@@ -430,18 +458,32 @@ export default function App() {
       }
     });
 
+    // Auto sign-in anonymously if not authenticated to ensure robust Firebase security clearance
+    if (!auth.currentUser) {
+      signInAnonymously(auth).catch(() => {});
+    }
+
     // Unified function to apply incoming cloud updates to local state and trigger notifications
     const applyIncomingState = (incoming: any, specificNotification?: any) => {
       if (!incoming || !isMounted) return;
 
-      if (Array.isArray(incoming.tournaments) && incoming.tournaments.length > 0) {
+      if (Array.isArray(incoming.tournaments)) {
         setTournaments(incoming.tournaments);
+        try {
+          localStorage.setItem('playgol_tournaments_cache', JSON.stringify(incoming.tournaments));
+        } catch {}
       }
-      if (Array.isArray(incoming.teams) && incoming.teams.length > 0) {
+      if (Array.isArray(incoming.teams)) {
         setTeams(incoming.teams);
+        try {
+          localStorage.setItem('playgol_teams_cache', JSON.stringify(incoming.teams));
+        } catch {}
       }
-      if (Array.isArray(incoming.matches) && incoming.matches.length > 0) {
+      if (Array.isArray(incoming.matches)) {
         setMatches(incoming.matches);
+        try {
+          localStorage.setItem('playgol_matches_cache', JSON.stringify(incoming.matches));
+        } catch {}
       }
 
       if (Array.isArray(incoming.notifications)) {
@@ -475,13 +517,65 @@ export default function App() {
       setIsLoading(false);
     };
 
-    // 1. Initial State Fetch from Cloud Backend
+    // 1. PRIMARY CLOUD PERSISTENCE: Real-time Firestore Master Snapshot Listener
+    let hasInitializedFirestoreSeed = false;
+    const unsubscribeFirestore = onSnapshot(
+      doc(db, 'app_state', 'main'),
+      (docSnap) => {
+        if (!isMounted) return;
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          if (data && (Array.isArray(data.tournaments) || Array.isArray(data.teams))) {
+            applyIncomingState({
+              teams: data.teams || [],
+              tournaments: data.tournaments || [],
+              matches: data.matches || [],
+              notifications: data.notifications || []
+            }, data.lastNotification);
+          }
+        } else if (!hasInitializedFirestoreSeed) {
+          hasInitializedFirestoreSeed = true;
+          // Seed Firestore with initial state on first initialization
+          const seedPayload = {
+            teams: cleanForFirestore(teams),
+            tournaments: cleanForFirestore(tournaments),
+            matches: cleanForFirestore(matches),
+            notifications: [],
+            updatedAt: Date.now()
+          };
+          setDoc(doc(db, 'app_state', 'main'), seedPayload).catch(err => {
+            console.warn("Firestore seed initial error:", err);
+          });
+        }
+      },
+      (err) => {
+        console.warn("Firestore onSnapshot error:", err);
+      }
+    );
+
+    // 2. Realtime MQTT listener (Instant sub-100ms real-time 1:1 cross-device sync)
+    const unsubRealtimeState = realtimeSync.subscribeState((payload: SyncPayload) => {
+      if (isMounted && payload) {
+        applyIncomingState(payload, payload.notification);
+      }
+    });
+
+    const unsubRealtimeNotif = realtimeSync.subscribeNotif((notif: any) => {
+      if (isMounted && notif) {
+        setActiveCloudNotif(notif);
+        setNotifications(prev => [notif, ...prev.filter(n => n.id !== notif.id)].slice(0, 50));
+      }
+    });
+
+    // 3. Initial State Fetch from Cloud Backend
     const fetchLatestState = async () => {
       try {
         const res = await fetch(getApiUrl('/api/state'), { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
-          applyIncomingState(data);
+          if (data && (Array.isArray(data.tournaments) || Array.isArray(data.teams))) {
+            applyIncomingState(data);
+          }
         }
       } catch (err) {
         console.warn("Could not fetch state from cloud:", err);
@@ -492,7 +586,7 @@ export default function App() {
 
     fetchLatestState();
 
-    // 2. Real-time Server-Sent Events (SSE) stream for instant 1:1 sync across devices
+    // 4. Real-time Server-Sent Events (SSE) stream for dual backup sync
     const connectSSE = () => {
       if (typeof EventSource === 'undefined') return;
       try {
@@ -524,16 +618,19 @@ export default function App() {
 
     connectSSE();
 
-    // 3. Fallback polling every 3 seconds to guarantee 100% sync regardless of network disruptions
+    // 5. Fallback background polling every 4 seconds
     pollInterval = setInterval(() => {
       if (isMounted) {
         fetchLatestState();
       }
-    }, 3000);
+    }, 4000);
 
     return () => {
       isMounted = false;
       unsubscribeAuth();
+      unsubscribeFirestore();
+      unsubRealtimeState();
+      unsubRealtimeNotif();
       if (eventSource) {
         eventSource.close();
       }
@@ -680,6 +777,13 @@ export default function App() {
     setTournaments(cleanTournaments);
     setMatches(cleanMatches);
 
+    // Save to local cache immediately to prevent loss on refresh
+    try {
+      localStorage.setItem('playgol_teams_cache', JSON.stringify(cleanTeams));
+      localStorage.setItem('playgol_tournaments_cache', JSON.stringify(cleanTournaments));
+      localStorage.setItem('playgol_matches_cache', JSON.stringify(cleanMatches));
+    } catch {}
+
     let updatedNotifs = notifications;
     let createdNotif: AppNotification | undefined;
 
@@ -694,7 +798,17 @@ export default function App() {
       setNotifications(updatedNotifs);
     }
 
-    // 1. Sync state to Cloud Server backend and broadcast immediately via SSE to all active visitors/admins
+    // 1. Instant sub-100ms 1:1 real-time sync broadcast over MQTT
+    realtimeSync.publishState({
+      teams: cleanTeams,
+      tournaments: cleanTournaments,
+      matches: cleanMatches,
+      notifications: updatedNotifs,
+      notification: createdNotif,
+      timestamp: Date.now()
+    });
+
+    // 2. Sync state to Cloud Server backend and broadcast via SSE as backup
     try {
       await fetch(getApiUrl('/api/state'), {
         method: 'POST',
@@ -711,7 +825,21 @@ export default function App() {
       console.warn("Could not post state to cloud:", err);
     }
 
-    // 2. Parallel background sync to Firestore
+    // 3. Guaranteed Master State Cloud Persistence in Firestore
+    try {
+      await setDoc(doc(db, 'app_state', 'main'), {
+        teams: cleanTeams,
+        tournaments: cleanTournaments,
+        matches: cleanMatches,
+        notifications: updatedNotifs,
+        lastNotification: createdNotif || null,
+        updatedAt: Date.now()
+      });
+    } catch (err) {
+      console.warn("Firestore master state sync warning:", err);
+    }
+
+    // 4. Parallel background sync to individual Firestore collections
     try {
       const batchTeams = writeBatch(db);
       cleanTeams.forEach(t => {
@@ -759,6 +887,9 @@ export default function App() {
     setNotifications(updatedNotifications);
     setActiveCloudNotif(newNotif);
 
+    // Instant broadcast via realtime MQTT
+    realtimeSync.publishNotification(newNotif);
+
     // Broadcast through Cloud Server SSE endpoint
     try {
       await fetch(getApiUrl('/api/notify'), {
@@ -781,6 +912,13 @@ export default function App() {
   const handleClearAllNotifications = async () => {
     setNotifications([]);
     setActiveCloudNotif(null);
+    realtimeSync.publishState({
+      teams,
+      tournaments,
+      matches,
+      notifications: [],
+      timestamp: Date.now()
+    });
     try {
       await fetch(getApiUrl('/api/state'), {
         method: 'POST',
@@ -932,7 +1070,7 @@ export default function App() {
       return t;
     });
 
-    saveState(teams, updated, matches);
+    saveState(teams, updated, matches, `Se actualizaron los datos del torneo: ${editingTournament.name.trim()}`, editingTournament.id);
     setEditingTournament(null);
   };
 
@@ -950,7 +1088,7 @@ export default function App() {
       return t;
     });
 
-    saveState(updated, tournaments, matches);
+    saveState(updated, tournaments, matches, `Se actualizaron los datos del club: ${editingTeam.name.trim()}`);
     setEditingTeam(null);
   };
 
@@ -1857,24 +1995,23 @@ export default function App() {
       }
     }
 
-    saveState(teams, tournaments, updatedMatches);
-
-    // Send notifications
     const scoreTour = tournaments.find(t => t.id === editingMatch.tournamentId);
     const teamA = teams.find(t => t.id === editingMatch.teamAId)?.name || 'Equipo A';
     const teamB = teams.find(t => t.id === editingMatch.teamBId)?.name || 'Equipo B';
+    let notifText = '';
     if (scoreTour) {
       if (played) {
         let penText = "";
         if (penaltiesA !== null && penaltiesB !== null) {
           penText = ` (Pen: ${penaltiesA} - ${penaltiesB})`;
         }
-        sendNotification(`Actualización del torneo ${scoreTour.name}: Se actualizó el resultado: ${teamA} ${scoreA} - ${scoreB} ${teamB}${penText}`, scoreTour.id);
+        notifText = `Actualización del torneo ${scoreTour.name}: Se actualizó el resultado: ${teamA} ${scoreA} - ${scoreB} ${teamB}${penText}`;
       } else {
-        sendNotification(`Actualización del torneo ${scoreTour.name}: Se reinició el marcador de ${teamA} vs ${teamB}`, scoreTour.id);
+        notifText = `Actualización del torneo ${scoreTour.name}: Se reinició el marcador de ${teamA} vs ${teamB}`;
       }
     }
 
+    saveState(teams, tournaments, updatedMatches, notifText || undefined, scoreTour?.id);
     setEditingMatch(null);
   };
 

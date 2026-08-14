@@ -2,6 +2,11 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
+import mqtt from "mqtt";
+
+const MQTT_BROKER = "wss://broker.emqx.io:8084/mqtt";
+const TOPIC_SYNC = "playgol/sync/184d974d-929a-4d47-812c-35e4e28a3f4a";
+const TOPIC_NOTIF = "playgol/notif/184d974d-929a-4d47-812c-35e4e28a3f4a";
 
 async function startServer() {
   const app = express();
@@ -64,6 +69,59 @@ async function startServer() {
       }
     }
   };
+
+  // Connect to Cloud Realtime MQTT broker for universal 1:1 cross-device synchronization
+  let mqttClient: mqtt.MqttClient | null = null;
+  try {
+    mqttClient = mqtt.connect(MQTT_BROKER, {
+      clientId: `server-${Date.now()}`,
+      clean: true,
+      reconnectPeriod: 2000,
+      keepalive: 30
+    });
+
+    mqttClient.on("connect", () => {
+      console.log("Server connected to MQTT Cloud Broker");
+      mqttClient?.subscribe([TOPIC_SYNC, TOPIC_NOTIF], { qos: 1 });
+
+      // Publish initial state to retain topic if data.json exists
+      const current = readState();
+      if (current.tournaments.length > 0) {
+        mqttClient?.publish(
+          TOPIC_SYNC,
+          JSON.stringify({
+            teams: current.teams,
+            tournaments: current.tournaments,
+            matches: current.matches,
+            notifications: current.notifications,
+            timestamp: Date.now(),
+            senderId: "server"
+          }),
+          { retain: true, qos: 1 }
+        );
+      }
+    });
+
+    mqttClient.on("message", (topic, msg) => {
+      try {
+        const payload = JSON.parse(msg.toString());
+        if (topic === TOPIC_SYNC && payload && payload.tournaments) {
+          if (payload.senderId !== "server") {
+            const newState = {
+              teams: payload.teams || [],
+              tournaments: payload.tournaments || [],
+              matches: payload.matches || [],
+              notifications: payload.notifications || []
+            };
+            writeState(newState);
+            broadcastState(newState, payload.notification);
+          }
+        }
+      } catch (err) {}
+    });
+  } catch (err) {
+    console.warn("MQTT server init:", err);
+  }
 
   // Heartbeat every 15 seconds to keep SSE streams alive on mobile networks
   setInterval(() => {
@@ -149,6 +207,20 @@ async function startServer() {
     if (success) {
       // Broadcast real-time 1:1 update to all active devices/visitors immediately
       broadcastState(fullState, notification);
+
+      if (mqttClient && mqttClient.connected) {
+        mqttClient.publish(
+          TOPIC_SYNC,
+          JSON.stringify({
+            ...fullState,
+            notification,
+            timestamp: Date.now(),
+            senderId: "server"
+          }),
+          { retain: true, qos: 1 }
+        );
+      }
+
       res.json({ success: true, timestamp: Date.now() });
     } else {
       res.status(500).json({ error: "Failed to save state" });
@@ -167,6 +239,21 @@ async function startServer() {
     state.notifications = updatedNotifs;
     writeState(state);
     broadcastState(state, notification);
+
+    if (mqttClient && mqttClient.connected) {
+      mqttClient.publish(
+        TOPIC_SYNC,
+        JSON.stringify({
+          ...state,
+          notification,
+          timestamp: Date.now(),
+          senderId: "server"
+        }),
+        { retain: true, qos: 1 }
+      );
+      mqttClient.publish(TOPIC_NOTIF, JSON.stringify(notification), { qos: 1 });
+    }
+
     res.json({ success: true, notifications: updatedNotifs });
   });
 
