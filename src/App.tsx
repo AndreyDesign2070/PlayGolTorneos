@@ -1253,6 +1253,7 @@ export default function App() {
     };
 
     saveState([...teams, created], tournaments, matches);
+    sendNotification(`Nuevo club registrado en la plataforma: ${created.name}`);
     setNewTeam({ name: '', primaryColor: '#10b981', secondaryColor: '#1f2937', badgeSymbol: 'ball', logoUrl: '' });
     setShowTeamModal(false);
   };
@@ -1298,6 +1299,7 @@ export default function App() {
     };
 
     saveState(teams, [...tournaments, created], matches);
+    sendNotification(`Nuevo torneo creado: ${created.name}`, created.id);
     setSelectedTournamentId(created.id);
     setNewTournament({ name: '', type: 'LIGA', numGroups: 2, numTeams: 8, faseFinalType: 'semis', logoUrl: '', adminPassword: '', visitorPassword: '' });
     setShowTournamentModal(false);
@@ -1427,6 +1429,12 @@ export default function App() {
     }
 
     saveState(teams, updatedTours, [...matches, created]);
+    const tourForLlave = updatedTours.find(t => t.id === selectedTournamentId);
+    const teamAName = teams.find(t => t.id === manualLlaveState.teamAId)?.name || 'Equipo A';
+    const teamBName = teams.find(t => t.id === manualLlaveState.teamBId)?.name || 'Equipo B';
+    if (tourForLlave) {
+      sendNotification(`Actualización del torneo ${tourForLlave.name}: Se programó un nuevo cruce de eliminación directa (${created.round}): ${teamAName} vs ${teamBName}`, tourForLlave.id);
+    }
     setShowAddManualLlaveModal(false);
     setManualLlaveState({
       phaseName: 'Segunda Fase',
@@ -1469,6 +1477,10 @@ export default function App() {
     });
 
     saveState(teams, updatedTours, matches);
+    const assignedTeamObj = teams.find(t => t.id === assignTeamState.teamId);
+    if (assignedTeamObj) {
+      sendNotification(`Actualización del torneo ${tour.name}: Se integró a ${assignedTeamObj.name} a la competencia`, tour.id);
+    }
     setShowAssignModal(false);
     setAssignTeamState({ teamId: '', group: 'A' });
   };
