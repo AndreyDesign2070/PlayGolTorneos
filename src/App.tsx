@@ -12,7 +12,7 @@ import {
 
 import { auth, db } from './lib/firebase';
 import { 
-  onSnapshot, collection, getDocs, doc, setDoc, deleteDoc, writeBatch 
+  onSnapshot, collection, getDocs, getDoc, doc, setDoc, deleteDoc, writeBatch 
 } from 'firebase/firestore';
 import { 
   onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut 
@@ -417,121 +417,57 @@ export default function App() {
     let unsubMatches: () => void = () => {};
     let unsubNotifications: () => void = () => {};
 
-    let isSeeding = false;
-    const seedFirestoreIfNeeded = async () => {
-      if (isSeeding) return;
-      isSeeding = true;
+    const checkAndSeedInitialData = async () => {
       try {
-        console.log("Firestore tournaments collection is empty. Starting seeding process...");
-        let seedTeamsData: Team[] = [];
-        let seedTournamentsData: Tournament[] = [];
-        let seedMatchesData: Match[] = [];
-
-        // Try fetching existing data from Express data.json to avoid losing the user's custom matchups!
-        try {
-          const apiRes = await fetchWithRetry('/api/state', {}, 3, 500);
-          const apiData = await apiRes.json();
-          if (apiData && Array.isArray(apiData.teams) && apiData.teams.length > 0) {
-            seedTeamsData = apiData.teams;
-            seedTournamentsData = apiData.tournaments;
-            seedMatchesData = apiData.matches;
+        const metaDocRef = doc(db, "metadata", "app_init");
+        const metaDoc = await getDoc(metaDocRef);
+        
+        if (!metaDoc.exists()) {
+          // Check if tournaments collection already has data
+          const tourSnap = await getDocs(collection(db, "tournaments"));
+          if (tourSnap.empty) {
+            console.log("Firestore empty. Seeding initial tournaments, teams and matches...");
+            const batch = writeBatch(db);
+            INITIAL_TEAMS.forEach(t => batch.set(doc(db, "teams", t.id), t));
+            INITIAL_TOURNAMENTS.forEach(t => batch.set(doc(db, "tournaments", t.id), t));
+            INITIAL_MATCHES.forEach(m => {
+              const mDoc = { ...m };
+              if (mDoc.group === undefined) delete mDoc.group;
+              if (mDoc.bracketSlot === undefined) delete mDoc.bracketSlot;
+              if ((mDoc as any).overrideTeams === undefined) delete (mDoc as any).overrideTeams;
+              batch.set(doc(db, "matches", m.id), mDoc);
+            });
+            batch.set(metaDocRef, { initialized: true, seededAt: Date.now() });
+            await batch.commit();
+            console.log("Firestore initial seed finished!");
+          } else {
+            await setDoc(metaDocRef, { initialized: true, existingData: true });
           }
-        } catch (e) {
-          console.warn("Could not fetch state from Express server to seed, falling back gracefully:", e);
         }
-
-        // Fallback to initial seed from initialData.ts if the server didn't have data
-        if (seedTeamsData.length === 0) {
-          seedTeamsData = INITIAL_TEAMS;
-          seedTournamentsData = INITIAL_TOURNAMENTS;
-          seedMatchesData = INITIAL_MATCHES;
-        }
-
-        // Perform batch write to populate Firestore collections
-        const batch = writeBatch(db);
-        seedTeamsData.forEach(t => {
-          batch.set(doc(db, "teams", t.id), t);
-        });
-        seedTournamentsData.forEach(t => {
-          batch.set(doc(db, "tournaments", t.id), t);
-        });
-        seedMatchesData.forEach(m => {
-          const mDoc = { ...m };
-          if (mDoc.group === undefined) delete mDoc.group;
-          if (mDoc.bracketSlot === undefined) delete mDoc.bracketSlot;
-          if ((mDoc as any).overrideTeams === undefined) delete (mDoc as any).overrideTeams;
-          batch.set(doc(db, "matches", m.id), mDoc);
-        });
-
-        await batch.commit();
-        console.log("Firestore collections seeded successfully!");
       } catch (err) {
-        console.error("Error in seedFirestoreIfNeeded:", err);
-      } finally {
-        isSeeding = false;
+        console.warn("Check and seed initial data:", err);
       }
     };
 
-    const loadLocalFallback = async () => {
+    const loadLocalFallback = () => {
       try {
-        // 1. Try fetching current state from server first
-        const apiRes = await fetchWithRetry('/api/state', {}, 2, 300);
-        const apiData = await apiRes.json();
-
-        const serverHasData = apiData && Array.isArray(apiData.tournaments) && apiData.tournaments.length > 0;
-
-        if (serverHasData) {
-          setTeams(apiData.teams || []);
-          setTournaments(apiData.tournaments || []);
-          setMatches(apiData.matches || []);
-          if (Array.isArray(apiData.notifications) && apiData.notifications.length > 0) {
-            setNotifications(apiData.notifications);
-          }
-          localStorage.setItem('playgol_teams', JSON.stringify(apiData.teams || []));
-          localStorage.setItem('playgol_tournaments', JSON.stringify(apiData.tournaments || []));
-          localStorage.setItem('playgol_matches', JSON.stringify(apiData.matches || []));
-          setIsLoading(false);
-          return;
-        }
-
-        // 2. If server was empty, check if THIS device has localStorage data
         const localTeams = localStorage.getItem('playgol_teams');
         const localTours = localStorage.getItem('playgol_tournaments');
         const localMatches = localStorage.getItem('playgol_matches');
+        const localNotifs = localStorage.getItem('playgol_notifications');
 
         if (localTeams && localTours && localMatches) {
-          const parsedTeams = JSON.parse(localTeams);
-          const parsedTours = JSON.parse(localTours);
-          const parsedMatches = JSON.parse(localMatches);
-
-          if (Array.isArray(parsedTours) && parsedTours.length >= INITIAL_TOURNAMENTS.length) {
-            setTeams(parsedTeams);
-            setTournaments(parsedTours);
-            setMatches(parsedMatches);
-
-            // Sync this local data up to the server immediately so all visitor devices can see it!
-            await fetchWithRetry('/api/state', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                teams: parsedTeams,
-                tournaments: parsedTours,
-                matches: parsedMatches,
-                notifications: notifications || []
-              })
-            }, 3, 500);
-            setIsLoading(false);
-            return;
-          } else {
-            setTeams(INITIAL_TEAMS);
-            setTournaments(INITIAL_TOURNAMENTS);
-            setMatches(INITIAL_MATCHES);
-            localStorage.setItem('playgol_teams', JSON.stringify(INITIAL_TEAMS));
-            localStorage.setItem('playgol_tournaments', JSON.stringify(INITIAL_TOURNAMENTS));
-            localStorage.setItem('playgol_matches', JSON.stringify(INITIAL_MATCHES));
-            setIsLoading(false);
-            return;
-          }
+          setTeams(JSON.parse(localTeams));
+          setTournaments(JSON.parse(localTours));
+          setMatches(JSON.parse(localMatches));
+          if (localNotifs) setNotifications(JSON.parse(localNotifs));
+        } else {
+          setTeams(INITIAL_TEAMS);
+          setTournaments(INITIAL_TOURNAMENTS);
+          setMatches(INITIAL_MATCHES);
+          localStorage.setItem('playgol_teams', JSON.stringify(INITIAL_TEAMS));
+          localStorage.setItem('playgol_tournaments', JSON.stringify(INITIAL_TOURNAMENTS));
+          localStorage.setItem('playgol_matches', JSON.stringify(INITIAL_MATCHES));
         }
       } catch (e) {
         console.warn("Fallback state load attempt:", e);
@@ -541,58 +477,46 @@ export default function App() {
     };
 
     const setupFirebaseSync = () => {
-      // 3. Subscribe to real-time changes in Firestore immediately & non-blockingly
+      // 1. Teams listener
       unsubTeams = onSnapshot(collection(db, "teams"), (snapshot) => {
         const list: Team[] = [];
         snapshot.forEach(d => {
           list.push(d.data() as Team);
         });
-        if (list.length > 0) {
-          setTeams(list);
-          localStorage.setItem('playgol_teams', JSON.stringify(list));
-        }
+        setTeams(list);
+        localStorage.setItem('playgol_teams', JSON.stringify(list));
         setIsLoading(false);
       }, (error) => {
-        console.warn("Firestore teams subscription fallback:", error?.message || error);
-        loadLocalFallback();
+        console.warn("Firestore teams listener:", error);
       });
 
+      // 2. Tournaments listener
       unsubTournaments = onSnapshot(collection(db, "tournaments"), (snapshot) => {
         const list: Tournament[] = [];
         snapshot.forEach(d => {
           list.push(d.data() as Tournament);
         });
-        if (list.length > 0) {
-          setTournaments(list);
-          localStorage.setItem('playgol_tournaments', JSON.stringify(list));
-        } else {
-          loadLocalFallback();
-        }
+        setTournaments(list);
+        localStorage.setItem('playgol_tournaments', JSON.stringify(list));
         setIsLoading(false);
-
-        if (snapshot.empty || snapshot.docs.length < INITIAL_TOURNAMENTS.length) {
-          seedFirestoreIfNeeded();
-        }
       }, (error) => {
-        console.warn("Firestore tournaments subscription fallback:", error?.message || error);
-        loadLocalFallback();
+        console.warn("Firestore tournaments listener:", error);
       });
 
+      // 3. Matches listener
       unsubMatches = onSnapshot(collection(db, "matches"), (snapshot) => {
         const list: Match[] = [];
         snapshot.forEach(d => {
           list.push(d.data() as Match);
         });
-        if (list.length > 0) {
-          setMatches(list);
-          localStorage.setItem('playgol_matches', JSON.stringify(list));
-        }
+        setMatches(list);
+        localStorage.setItem('playgol_matches', JSON.stringify(list));
         setIsLoading(false);
       }, (error) => {
-        console.warn("Firestore matches subscription fallback:", error?.message || error);
-        loadLocalFallback();
+        console.warn("Firestore matches listener:", error);
       });
 
+      // 4. Notifications listener
       unsubNotifications = onSnapshot(collection(db, "notifications"), (snapshot) => {
         const list: AppNotification[] = [];
         snapshot.forEach(d => {
@@ -600,14 +524,13 @@ export default function App() {
         });
         list.sort((a, b) => b.timestamp - a.timestamp);
 
-        // Trigger floating Cloud Toast and native browser notification on new updates
+        // Trigger floating Cloud Toast and native browser notification on new incoming items
         if (!isFirstNotifLoadRef.current && list.length > 0) {
           const newItems = list.filter(n => !previousNotifIdsRef.current.has(n.id));
           if (newItems.length > 0) {
             const newest = newItems[0];
             setActiveCloudNotif(newest);
 
-            // Native Web Browser Notification (works even if tab is in background)
             if ('Notification' in window && Notification.permission === 'granted') {
               try {
                 new Notification('PlayGol - Actualización', {
@@ -626,13 +549,16 @@ export default function App() {
 
         previousNotifIdsRef.current = new Set(list.map(n => n.id));
         setNotifications(list);
+        localStorage.setItem('playgol_notifications', JSON.stringify(list));
       }, (error) => {
-        console.warn("Firestore notifications subscription fallback:", error?.message || error);
+        console.warn("Firestore notifications listener:", error);
       });
     };
 
     loadLocalFallback();
-    setupFirebaseSync();
+    checkAndSeedInitialData().then(() => {
+      setupFirebaseSync();
+    });
 
     // Periodic sync polling to ensure all visitors stay updated live even if Firestore quota is exceeded
     const syncInterval = setInterval(async () => {
@@ -807,9 +733,9 @@ export default function App() {
     localStorage.setItem('playgol_tournaments', JSON.stringify(cleanTournaments));
     localStorage.setItem('playgol_matches', JSON.stringify(cleanMatches));
 
-    // ALWAYS sync state to Express server backend (data.json) so all visitors immediately see updates!
+    // Sync state to Express server backend if available
     try {
-      await fetchWithRetry('/api/state', {
+      fetch('/api/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -818,58 +744,64 @@ export default function App() {
           matches: cleanMatches,
           notifications
         })
-      }, 3, 500);
-    } catch (apiErr) {
-      console.warn("Could not sync state to Express server:", apiErr);
-    }
+      }).catch(() => {});
+    } catch {}
 
-    // Update Firestore if authorized
-    const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
-    if (isAuthorizedEditor) {
-      try {
-        // Compare with current local states to perform targeted Firestore updates (diffing)
-        
-        // 1. Diff Teams
-        for (const t of cleanTeams) {
-          const existing = teams.find(x => x.id === t.id);
-          if (!existing || JSON.stringify(existing) !== JSON.stringify(t)) {
-            await setDoc(doc(db, 'teams', t.id), t);
-          }
+    // Synchronize directly with Firestore in atomic batches
+    try {
+      // 1. Teams Sync
+      const teamSnap = await getDocs(collection(db, 'teams'));
+      const batchTeams = writeBatch(db);
+      cleanTeams.forEach(t => {
+        batchTeams.set(doc(db, 'teams', t.id), t);
+      });
+      teamSnap.forEach(d => {
+        if (!cleanTeams.some(t => t.id === d.id)) {
+          batchTeams.delete(d.ref);
         }
-        for (const t of teams) {
-          if (!cleanTeams.some(x => x.id === t.id)) {
-            await deleteDoc(doc(db, 'teams', t.id));
-          }
-        }
+      });
+      await batchTeams.commit();
 
-        // 2. Diff Tournaments
-        for (const t of cleanTournaments) {
-          const existing = tournaments.find(x => x.id === t.id);
-          if (!existing || JSON.stringify(existing) !== JSON.stringify(t)) {
-            await setDoc(doc(db, 'tournaments', t.id), t);
-          }
+      // 2. Tournaments Sync
+      const tourSnap = await getDocs(collection(db, 'tournaments'));
+      const batchTours = writeBatch(db);
+      cleanTournaments.forEach(t => {
+        batchTours.set(doc(db, 'tournaments', t.id), t);
+      });
+      tourSnap.forEach(d => {
+        if (!cleanTournaments.some(t => t.id === d.id)) {
+          batchTours.delete(d.ref);
         }
-        for (const t of tournaments) {
-          if (!cleanTournaments.some(x => x.id === t.id)) {
-            await deleteDoc(doc(db, 'tournaments', t.id));
-          }
-        }
+      });
+      await batchTours.commit();
 
-        // 3. Diff Matches
-        for (const m of cleanMatches) {
-          const existing = matches.find(x => x.id === m.id);
-          if (!existing || JSON.stringify(existing) !== JSON.stringify(m)) {
-            await setDoc(doc(db, 'matches', m.id), m);
+      // 3. Matches Sync (chunked into batches < 400)
+      const matchSnap = await getDocs(collection(db, 'matches'));
+      const existingMatchIds = new Set(cleanMatches.map(m => m.id));
+      const deletedMatchDocs = matchSnap.docs.filter(d => !existingMatchIds.has(d.id));
+
+      const ops: { type: 'set' | 'delete', ref: any, data?: any }[] = [];
+      cleanMatches.forEach(m => {
+        ops.push({ type: 'set', ref: doc(db, 'matches', m.id), data: m });
+      });
+      deletedMatchDocs.forEach(d => {
+        ops.push({ type: 'delete', ref: d.ref });
+      });
+
+      for (let i = 0; i < ops.length; i += 400) {
+        const chunk = ops.slice(i, i + 400);
+        const matchBatch = writeBatch(db);
+        chunk.forEach(op => {
+          if (op.type === 'set') {
+            matchBatch.set(op.ref, op.data);
+          } else {
+            matchBatch.delete(op.ref);
           }
-        }
-        for (const m of matches) {
-          if (!cleanMatches.some(x => x.id === m.id)) {
-            await deleteDoc(doc(db, 'matches', m.id));
-          }
-        }
-      } catch (err) {
-        console.warn("Firestore sync warning:", err);
+        });
+        await matchBatch.commit();
       }
+    } catch (err) {
+      console.warn("Firestore sync warning:", err);
     }
   };
 
@@ -883,10 +815,11 @@ export default function App() {
 
     const updatedNotifications = [newNotif, ...notifications].slice(0, 50);
     setNotifications(updatedNotifications);
+    localStorage.setItem('playgol_notifications', JSON.stringify(updatedNotifications));
 
     // Sync with Express backend
     try {
-      await fetchWithRetry('/api/state', {
+      fetch('/api/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -895,18 +828,30 @@ export default function App() {
           matches,
           notifications: updatedNotifications
         })
-      }, 3, 500);
-    } catch (apiErr) {
-      console.warn("Could not sync notification state to Express server:", apiErr);
-    }
+      }).catch(() => {});
+    } catch {}
 
-    const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
-    if (isAuthorizedEditor) {
-      try {
-        await setDoc(doc(db, 'notifications', newNotif.id), newNotif);
-      } catch (err) {
-        console.warn("Error writing notification to Firestore:", err);
-      }
+    // Save notification to Firestore
+    try {
+      await setDoc(doc(db, 'notifications', newNotif.id), newNotif);
+    } catch (err) {
+      console.warn("Error writing notification to Firestore:", err);
+    }
+  };
+
+  const handleClearAllNotifications = async () => {
+    setNotifications([]);
+    setActiveCloudNotif(null);
+    localStorage.removeItem('playgol_notifications');
+    try {
+      const snap = await getDocs(collection(db, 'notifications'));
+      const batch = writeBatch(db);
+      snap.forEach(d => {
+        batch.delete(d.ref);
+      });
+      await batch.commit();
+    } catch (err) {
+      console.error("Error clearing notifications in Firestore:", err);
     }
   };
 
@@ -2375,22 +2320,8 @@ export default function App() {
                     <span className="text-xs font-black text-slate-200">Notificaciones Recientes</span>
                     {notifications.length > 0 && (
                       <button
-                        onClick={async () => {
-                          const isAuthorizedEditor = role === 'admin' || Object.values(unlockedTournaments).some(r => r === 'AdminTorneo');
-                          if (isAuthorizedEditor) {
-                            try {
-                              const batch = writeBatch(db);
-                              notifications.forEach(n => {
-                                batch.delete(doc(db, 'notifications', n.id));
-                              });
-                              await batch.commit();
-                            } catch (err) {
-                              console.error("Error clearing notifications in Firestore:", err);
-                            }
-                          }
-                          setNotifications([]);
-                        }}
-                        className="text-[10px] font-bold text-red-400 hover:text-red-300 transition"
+                        onClick={handleClearAllNotifications}
+                        className="text-[10px] font-bold text-red-400 hover:text-red-300 transition cursor-pointer"
                       >
                         Limpiar todo
                       </button>
