@@ -6,10 +6,10 @@ import mqtt from "mqtt";
 
 const MQTT_BROKER = "wss://broker.hivemq.com:8884/mqtt";
 const APP_ID = "184d974d-929a-4d47-812c-35e4e28a3f4a";
-const TOPIC_ACTION = `playgol/v2/action/${APP_ID}`;
-const TOPIC_SYNC = `playgol/v2/sync/${APP_ID}`;
-const TOPIC_NOTIF = `playgol/v2/notif/${APP_ID}`;
-const TOPIC_REQ = `playgol/v2/req/${APP_ID}`;
+const TOPIC_ACTION = `playgol/v3/action/${APP_ID}`;
+const TOPIC_SYNC = `playgol/v3/sync/${APP_ID}`;
+const TOPIC_NOTIF = `playgol/v3/notif/${APP_ID}`;
+const TOPIC_REQ = `playgol/v3/req/${APP_ID}`;
 
 async function startServer() {
   const app = express();

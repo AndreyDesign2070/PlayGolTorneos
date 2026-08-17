@@ -1151,20 +1151,19 @@ export default function App() {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 96;
-        const MAX_HEIGHT = 96;
+        const MAX_SIZE = 128;
         let width = img.width;
         let height = img.height;
 
         if (width > height) {
-          if (width > MAX_WIDTH) {
-            height = Math.round(height * (MAX_WIDTH / width));
-            width = MAX_WIDTH;
+          if (width > MAX_SIZE) {
+            height = Math.round(height * (MAX_SIZE / width));
+            width = MAX_SIZE;
           }
         } else {
-          if (height > MAX_HEIGHT) {
-            width = Math.round(width * (MAX_HEIGHT / height));
-            height = MAX_HEIGHT;
+          if (height > MAX_SIZE) {
+            width = Math.round(width * (MAX_SIZE / height));
+            height = MAX_SIZE;
           }
         }
 
@@ -1172,10 +1171,16 @@ export default function App() {
         canvas.height = Math.max(1, height);
         const ctx = canvas.getContext('2d');
         if (ctx) {
+          ctx.clearRect(0, 0, width, height);
           ctx.drawImage(img, 0, 0, width, height);
-          let compressedBase64 = canvas.toDataURL('image/webp', 0.7);
-          if (!compressedBase64.startsWith('data:image/webp')) {
-            compressedBase64 = canvas.toDataURL('image/jpeg', 0.7);
+          // Prefer PNG or WebP with transparency for crisp football club badges
+          let compressedBase64 = canvas.toDataURL('image/png');
+          // If PNG is slightly large (> 50KB), fallback to high quality webp
+          if (compressedBase64.length > 50000) {
+            const webp = canvas.toDataURL('image/webp', 0.85);
+            if (webp.startsWith('data:image/webp')) {
+              compressedBase64 = webp;
+            }
           }
           callback(compressedBase64);
         }
@@ -3698,9 +3703,18 @@ export default function App() {
                   <Upload className="w-4 h-4 text-emerald-400" /> Subir Imagen desde Galería
                 </button>
                 {newTeam.logoUrl && (
-                  <div className="mt-3 flex items-center gap-2 p-2 bg-slate-950 rounded-lg border border-slate-800">
-                    <img src={newTeam.logoUrl} alt="Preview" className="w-10 h-10 rounded-full object-contain bg-slate-900 p-0.5" />
-                    <span className="text-xs text-emerald-400 font-semibold">Cargado exitosamente ✓</span>
+                  <div className="mt-3 flex items-center justify-between p-2 bg-slate-950 rounded-lg border border-slate-800">
+                    <div className="flex items-center gap-2">
+                      <img src={newTeam.logoUrl} alt="Preview" className="w-10 h-10 rounded-full object-contain bg-slate-900 p-0.5 border border-slate-700" />
+                      <span className="text-xs text-emerald-400 font-semibold">Escudo personalizado ✓</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setNewTeam(prev => ({ ...prev, logoUrl: '' }))}
+                      className="text-xs text-red-400 hover:text-red-300 px-2 py-1 bg-red-950/40 border border-red-900/50 rounded-lg transition"
+                    >
+                      Quitar
+                    </button>
                   </div>
                 )}
               </div>
@@ -3856,11 +3870,20 @@ export default function App() {
                     }}
                   />
                   {newTournament.logoUrl && (
-                    <img 
-                      src={newTournament.logoUrl} 
-                      alt="Logo Preview" 
-                      className="w-8 h-8 rounded-lg object-contain border border-slate-800 bg-slate-950 p-0.5" 
-                    />
+                    <div className="flex items-center gap-2">
+                      <img 
+                        src={newTournament.logoUrl} 
+                        alt="Logo Preview" 
+                        className="w-9 h-9 rounded-xl object-contain border border-slate-700 bg-slate-950 p-0.5" 
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setNewTournament(prev => ({ ...prev, logoUrl: '' }))}
+                        className="text-xs text-red-400 hover:text-red-300 px-2 py-1 bg-red-950/40 border border-red-900/50 rounded-lg transition"
+                      >
+                        Quitar
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -4502,11 +4525,20 @@ export default function App() {
                     }}
                   />
                   {editingTeam.logoUrl && (
-                    <img 
-                      src={editingTeam.logoUrl} 
-                      alt="Logo Preview" 
-                      className="w-10 h-10 rounded-xl object-contain border border-slate-800 bg-slate-950 p-0.5" 
-                    />
+                    <div className="flex items-center gap-2">
+                      <img 
+                        src={editingTeam.logoUrl} 
+                        alt="Logo Preview" 
+                        className="w-10 h-10 rounded-xl object-contain border border-slate-700 bg-slate-950 p-0.5" 
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setEditingTeam(prev => prev ? ({ ...prev, logoUrl: '' }) : null)}
+                        className="text-xs text-red-400 hover:text-red-300 px-2 py-1 bg-red-950/40 border border-red-900/50 rounded-lg transition"
+                      >
+                        Quitar
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -4661,11 +4693,20 @@ export default function App() {
                     }}
                   />
                   {editingTournament.logoUrl && (
-                    <img 
-                      src={editingTournament.logoUrl} 
-                      alt="Logo Preview" 
-                      className="w-8 h-8 rounded-lg object-contain border border-slate-800 bg-slate-950 p-0.5" 
-                    />
+                    <div className="flex items-center gap-2">
+                      <img 
+                        src={editingTournament.logoUrl} 
+                        alt="Logo Preview" 
+                        className="w-8 h-8 rounded-lg object-contain border border-slate-700 bg-slate-950 p-0.5" 
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setEditingTournament(prev => prev ? ({ ...prev, logoUrl: '' }) : null)}
+                        className="text-xs text-red-400 hover:text-red-300 px-2 py-1 bg-red-950/40 border border-red-900/50 rounded-lg transition"
+                      >
+                        Quitar
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
