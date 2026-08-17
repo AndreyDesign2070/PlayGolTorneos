@@ -4,9 +4,12 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import mqtt from "mqtt";
 
-const MQTT_BROKER = "wss://broker.emqx.io:8084/mqtt";
-const TOPIC_SYNC = "playgol/sync/184d974d-929a-4d47-812c-35e4e28a3f4a";
-const TOPIC_NOTIF = "playgol/notif/184d974d-929a-4d47-812c-35e4e28a3f4a";
+const MQTT_BROKER = "wss://broker.hivemq.com:8884/mqtt";
+const APP_ID = "184d974d-929a-4d47-812c-35e4e28a3f4a";
+const TOPIC_ACTION = `playgol/v2/action/${APP_ID}`;
+const TOPIC_SYNC = `playgol/v2/sync/${APP_ID}`;
+const TOPIC_NOTIF = `playgol/v2/notif/${APP_ID}`;
+const TOPIC_REQ = `playgol/v2/req/${APP_ID}`;
 
 async function startServer() {
   const app = express();
@@ -82,7 +85,7 @@ async function startServer() {
 
     mqttClient.on("connect", () => {
       console.log("Server connected to MQTT Cloud Broker");
-      mqttClient?.subscribe([TOPIC_SYNC, TOPIC_NOTIF], { qos: 1 });
+      mqttClient?.subscribe([TOPIC_ACTION, TOPIC_SYNC, TOPIC_NOTIF, TOPIC_REQ], { qos: 1 });
 
       // Publish initial state to retain topic if data.json exists
       const current = readState();
@@ -105,7 +108,97 @@ async function startServer() {
     mqttClient.on("message", (topic, msg) => {
       try {
         const payload = JSON.parse(msg.toString());
-        if (topic === TOPIC_SYNC && payload && payload.tournaments) {
+        if (topic === TOPIC_REQ && payload && payload.type === "REQUEST_SYNC") {
+          const current = readState();
+          if (current.tournaments.length > 0) {
+            mqttClient?.publish(
+              TOPIC_SYNC,
+              JSON.stringify({
+                teams: current.teams,
+                tournaments: current.tournaments,
+                matches: current.matches,
+                notifications: current.notifications,
+                timestamp: Date.now(),
+                senderId: "server"
+              }),
+              { retain: false, qos: 1 }
+            );
+          }
+        } else if (topic === TOPIC_ACTION && payload && payload.action) {
+          const action = payload.action;
+          const current = readState();
+          let modified = false;
+          let notifToSend = null;
+
+          if (action.type === "MATCH_SCORE_UPDATE") {
+            current.matches = current.matches.map((m: any) => {
+              if (m.id === action.matchId) {
+                return {
+                  ...m,
+                  scoreA: action.scoreA,
+                  scoreB: action.scoreB,
+                  penaltiesA: action.penaltiesA ?? m.penaltiesA,
+                  penaltiesB: action.penaltiesB ?? m.penaltiesB,
+                  played: action.played
+                };
+              }
+              return m;
+            });
+            modified = true;
+          } else if (action.type === "MATCHES_UPDATE" && Array.isArray(action.matches)) {
+            const updateMap = new Map(action.matches.map((m: any) => [m.id, m]));
+            current.matches = current.matches.map((m: any) => updateMap.get(m.id) || m);
+            // Append any brand new matches
+            action.matches.forEach((m: any) => {
+              if (!current.matches.some((cm: any) => cm.id === m.id)) {
+                current.matches.push(m);
+              }
+            });
+            modified = true;
+          } else if (action.type === "TOURNAMENT_CREATE" && action.tournament) {
+            if (!current.tournaments.some((t: any) => t.id === action.tournament.id)) {
+              current.tournaments = [action.tournament, ...current.tournaments];
+              if (Array.isArray(action.matches)) {
+                current.matches = [...current.matches, ...action.matches];
+              }
+              modified = true;
+            }
+          } else if (action.type === "TOURNAMENT_UPDATE" && action.tournament) {
+            current.tournaments = current.tournaments.map((t: any) => t.id === action.tournament.id ? action.tournament : t);
+            modified = true;
+          } else if (action.type === "TOURNAMENT_DELETE" && action.tournamentId) {
+            current.tournaments = current.tournaments.filter((t: any) => t.id !== action.tournamentId);
+            current.matches = current.matches.filter((m: any) => m.tournamentId !== action.tournamentId);
+            modified = true;
+          } else if (action.type === "TEAM_CREATE" && action.team) {
+            if (!current.teams.some((t: any) => t.id === action.team.id)) {
+              current.teams = [...current.teams, action.team];
+              modified = true;
+            }
+          } else if (action.type === "TEAM_UPDATE" && action.team) {
+            current.teams = current.teams.map((t: any) => t.id === action.team.id ? action.team : t);
+            modified = true;
+          } else if (action.type === "TEAM_DELETE" && action.teamId) {
+            current.teams = current.teams.filter((t: any) => t.id !== action.teamId);
+            modified = true;
+          }
+
+          if (action.notifText) {
+            notifToSend = {
+              id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              text: action.notifText,
+              timestamp: Date.now(),
+              tournamentId: action.tournamentId
+            };
+            current.notifications = [notifToSend, ...(current.notifications || [])].slice(0, 50);
+            modified = true;
+          }
+
+          if (modified) {
+            writeState(current);
+            broadcastState(current, notifToSend);
+          }
+        } else if (topic === TOPIC_SYNC && payload && payload.tournaments) {
           if (payload.senderId !== "server") {
             const newState = {
               teams: payload.teams || [],

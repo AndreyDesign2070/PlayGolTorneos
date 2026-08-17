@@ -18,7 +18,7 @@ import {
   onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, signInAnonymously 
 } from 'firebase/auth';
 import { INITIAL_TEAMS, INITIAL_TOURNAMENTS, INITIAL_MATCHES } from './initialData';
-import { realtimeSync, SyncPayload } from './lib/realtimeSync';
+import { realtimeSync, SyncPayload, RealtimeAction } from './lib/realtimeSync';
 
 // Dynamic API backend URL resolver (resolves central cloud server across Netlify, PC, and mobile)
 export const getApiUrl = (endpoint: string): string => {
@@ -553,7 +553,145 @@ export default function App() {
       }
     );
 
-    // 2. Realtime MQTT listener (Instant sub-100ms real-time 1:1 cross-device sync)
+    // 2. Realtime Action Listener (Sub-15ms direct action delta updates)
+    const unsubRealtimeAction = realtimeSync.subscribeAction((action: RealtimeAction) => {
+      if (!isMounted || !action) return;
+
+      if (action.type === 'REQUEST_SYNC') {
+        setTournaments(currTours => {
+          if (currTours.length > 0) {
+            setTeams(currTeams => {
+              setMatches(currMatches => {
+                realtimeSync.publishState({
+                  teams: currTeams,
+                  tournaments: currTours,
+                  matches: currMatches,
+                  notifications: [],
+                  timestamp: Date.now()
+                });
+                return currMatches;
+              });
+              return currTeams;
+            });
+          }
+          return currTours;
+        });
+        return;
+      }
+
+      if (action.type === 'MATCH_SCORE_UPDATE') {
+        setMatches(prevMatches => {
+          let updated = prevMatches.map(m => {
+            if (m.id === action.matchId) {
+              return {
+                ...m,
+                scoreA: action.scoreA,
+                scoreB: action.scoreB,
+                penaltiesA: action.penaltiesA ?? m.penaltiesA,
+                penaltiesB: action.penaltiesB ?? m.penaltiesB,
+                played: action.played
+              };
+            }
+            return m;
+          });
+          if (action.tournamentId) {
+            updated = autoAdvanceLlaves(action.tournamentId, updated);
+          }
+          try { localStorage.setItem('playgol_matches_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+      } else if (action.type === 'MATCHES_UPDATE') {
+        setMatches(prevMatches => {
+          const updateMap = new Map(action.matches.map((m: any) => [m.id, m]));
+          let updated = prevMatches.map(m => updateMap.get(m.id) || m);
+          action.matches.forEach((m: any) => {
+            if (!updated.some(um => um.id === m.id)) updated.push(m);
+          });
+          if (action.tournamentId) {
+            updated = autoAdvanceLlaves(action.tournamentId, updated);
+          }
+          try { localStorage.setItem('playgol_matches_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+      } else if (action.type === 'MATCH_ADD') {
+        setMatches(prev => {
+          if (prev.some(m => m.id === action.match.id)) return prev;
+          const updated = [...prev, action.match];
+          try { localStorage.setItem('playgol_matches_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+      } else if (action.type === 'MATCH_DELETE') {
+        setMatches(prev => {
+          const updated = prev.filter(m => m.id !== action.matchId);
+          try { localStorage.setItem('playgol_matches_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+      } else if (action.type === 'TOURNAMENT_CREATE') {
+        setTournaments(prev => {
+          if (prev.some(t => t.id === action.tournament.id)) return prev;
+          const updated = [action.tournament, ...prev];
+          try { localStorage.setItem('playgol_tournaments_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+        if (action.matches && action.matches.length > 0) {
+          setMatches(prev => {
+            const updated = [...prev, ...action.matches!];
+            try { localStorage.setItem('playgol_matches_cache', JSON.stringify(updated)); } catch {}
+            return updated;
+          });
+        }
+      } else if (action.type === 'TOURNAMENT_UPDATE') {
+        setTournaments(prev => {
+          const updated = prev.map(t => t.id === action.tournament.id ? action.tournament : t);
+          try { localStorage.setItem('playgol_tournaments_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+      } else if (action.type === 'TOURNAMENT_DELETE') {
+        setTournaments(prev => {
+          const updated = prev.filter(t => t.id !== action.tournamentId);
+          try { localStorage.setItem('playgol_tournaments_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+        setMatches(prev => {
+          const updated = prev.filter(m => m.tournamentId !== action.tournamentId);
+          try { localStorage.setItem('playgol_matches_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+      } else if (action.type === 'TEAM_CREATE') {
+        setTeams(prev => {
+          if (prev.some(t => t.id === action.team.id)) return prev;
+          const updated = [...prev, action.team];
+          try { localStorage.setItem('playgol_teams_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+      } else if (action.type === 'TEAM_UPDATE') {
+        setTeams(prev => {
+          const updated = prev.map(t => t.id === action.team.id ? action.team : t);
+          try { localStorage.setItem('playgol_teams_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+      } else if (action.type === 'TEAM_DELETE') {
+        setTeams(prev => {
+          const updated = prev.filter(t => t.id !== action.teamId);
+          try { localStorage.setItem('playgol_teams_cache', JSON.stringify(updated)); } catch {}
+          return updated;
+        });
+      }
+
+      const notifText = (action as any).notifText;
+      if (notifText) {
+        const notifObj = {
+          id: `notif-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          text: notifText,
+          timestamp: Date.now(),
+          tournamentId: (action as any).tournamentId
+        };
+        setActiveCloudNotif(notifObj);
+        setNotifications(prev => [notifObj, ...prev.filter(n => n.id !== notifObj.id)].slice(0, 50));
+      }
+    });
+
+    // 3. Realtime MQTT listener (Instant sub-100ms real-time 1:1 cross-device sync)
     const unsubRealtimeState = realtimeSync.subscribeState((payload: SyncPayload) => {
       if (isMounted && payload) {
         applyIncomingState(payload, payload.notification);
@@ -567,7 +705,7 @@ export default function App() {
       }
     });
 
-    // 3. Initial State Fetch from Cloud Backend
+    // 4. Initial State Fetch from Cloud Backend
     const fetchLatestState = async () => {
       try {
         const res = await fetch(getApiUrl('/api/state'), { cache: 'no-store' });
@@ -586,7 +724,7 @@ export default function App() {
 
     fetchLatestState();
 
-    // 4. Real-time Server-Sent Events (SSE) stream for dual backup sync
+    // 5. Real-time Server-Sent Events (SSE) stream for dual backup sync
     const connectSSE = () => {
       if (typeof EventSource === 'undefined') return;
       try {
@@ -618,17 +756,18 @@ export default function App() {
 
     connectSSE();
 
-    // 5. Fallback background polling every 4 seconds
+    // 6. Fallback background polling every 3 seconds
     pollInterval = setInterval(() => {
       if (isMounted) {
         fetchLatestState();
       }
-    }, 4000);
+    }, 3000);
 
     return () => {
       isMounted = false;
       unsubscribeAuth();
       unsubscribeFirestore();
+      unsubRealtimeAction();
       unsubRealtimeState();
       unsubRealtimeNotif();
       if (eventSource) {
@@ -1005,36 +1144,39 @@ export default function App() {
     }
   };
 
-  // --- IMAGE UPLOAD HELPER (downscales to save localStorage size) ---
+  // --- IMAGE UPLOAD HELPER (downscales to save bandwidth and ensure instant real-time sync) ---
   const compressAndUploadImage = (file: File, callback: (base64: string) => void) => {
     const reader = new FileReader();
     reader.onload = (event) => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 150;
-        const MAX_HEIGHT = 150;
+        const MAX_WIDTH = 96;
+        const MAX_HEIGHT = 96;
         let width = img.width;
         let height = img.height;
 
         if (width > height) {
           if (width > MAX_WIDTH) {
-            height *= MAX_WIDTH / width;
+            height = Math.round(height * (MAX_WIDTH / width));
             width = MAX_WIDTH;
           }
         } else {
           if (height > MAX_HEIGHT) {
-            width *= MAX_HEIGHT / height;
+            width = Math.round(width * (MAX_HEIGHT / height));
             height = MAX_HEIGHT;
           }
         }
 
-        canvas.width = width;
-        canvas.height = height;
+        canvas.width = Math.max(1, width);
+        canvas.height = Math.max(1, height);
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          const compressedBase64 = canvas.toDataURL('image/png', 0.85);
+          let compressedBase64 = canvas.toDataURL('image/webp', 0.7);
+          if (!compressedBase64.startsWith('data:image/webp')) {
+            compressedBase64 = canvas.toDataURL('image/jpeg', 0.7);
+          }
           callback(compressedBase64);
         }
       };
@@ -1057,20 +1199,30 @@ export default function App() {
     e.preventDefault();
     if (!editingTournament || !editingTournament.name.trim()) return;
 
+    const updatedTour: Tournament = {
+      ...editingTournament,
+      name: editingTournament.name.trim(),
+      numGroups: editingTournament.type === 'GRUPOS' ? Number(editingTournament.numGroups || 2) : undefined,
+      numTeams: (editingTournament.type === 'LIGA' || editingTournament.type === 'ELIMINACION_DIRECTA') ? Number(editingTournament.numTeams || 8) : undefined,
+      faseFinalType: editingTournament.type === 'FASE_FINAL' ? editingTournament.faseFinalType : undefined,
+    };
+
     const updated = tournaments.map(t => {
       if (t.id === editingTournament.id) {
-        return {
-          ...editingTournament,
-          name: editingTournament.name.trim(),
-          numGroups: editingTournament.type === 'GRUPOS' ? Number(editingTournament.numGroups || 2) : undefined,
-          numTeams: (editingTournament.type === 'LIGA' || editingTournament.type === 'ELIMINACION_DIRECTA') ? Number(editingTournament.numTeams || 8) : undefined,
-          faseFinalType: editingTournament.type === 'FASE_FINAL' ? editingTournament.faseFinalType : undefined,
-        };
+        return updatedTour;
       }
       return t;
     });
 
-    saveState(teams, updated, matches, `Se actualizaron los datos del torneo: ${editingTournament.name.trim()}`, editingTournament.id);
+    const notif = `Se actualizaron los datos del torneo: ${editingTournament.name.trim()}`;
+    realtimeSync.publishAction({
+      type: 'TOURNAMENT_UPDATE',
+      tournament: updatedTour,
+      notifText: notif,
+      timestamp: Date.now()
+    });
+
+    saveState(teams, updated, matches, notif, editingTournament.id);
     setEditingTournament(null);
   };
 
@@ -1078,17 +1230,27 @@ export default function App() {
     e.preventDefault();
     if (!editingTeam || !editingTeam.name.trim()) return;
 
+    const updatedClub: Team = {
+      ...editingTeam,
+      name: editingTeam.name.trim()
+    };
+
     const updated = teams.map(t => {
       if (t.id === editingTeam.id) {
-        return {
-          ...editingTeam,
-          name: editingTeam.name.trim()
-        };
+        return updatedClub;
       }
       return t;
     });
 
-    saveState(updated, tournaments, matches, `Se actualizaron los datos del club: ${editingTeam.name.trim()}`);
+    const notif = `Se actualizaron los datos del club: ${editingTeam.name.trim()}`;
+    realtimeSync.publishAction({
+      type: 'TEAM_UPDATE',
+      team: updatedClub,
+      notifText: notif,
+      timestamp: Date.now()
+    });
+
+    saveState(updated, tournaments, matches, notif);
     setEditingTeam(null);
   };
 
@@ -1137,6 +1299,12 @@ export default function App() {
       }
     }
 
+    realtimeSync.publishAction({
+      type: 'MATCH_ADD',
+      match: created,
+      timestamp: Date.now()
+    });
+
     saveState(teams, updatedTours, [...matches, created]);
     
     // Trigger notification
@@ -1170,6 +1338,11 @@ export default function App() {
       '¿Eliminar Partido?',
       '¿Está seguro de querer eliminar este partido de la programación?',
       () => {
+        realtimeSync.publishAction({
+          type: 'MATCH_DELETE',
+          matchId,
+          timestamp: Date.now()
+        });
         const updatedMatches = matches.filter(m => m.id !== matchId);
         saveState(teams, tournaments, updatedMatches);
       }
@@ -1340,8 +1513,15 @@ export default function App() {
       logoUrl: newTeam.logoUrl || undefined
     };
 
-    saveState([...teams, created], tournaments, matches);
-    sendNotification(`Nuevo club registrado en la plataforma: ${created.name}`);
+    const notif = `Nuevo club registrado en la plataforma: ${created.name}`;
+    realtimeSync.publishAction({
+      type: 'TEAM_CREATE',
+      team: created,
+      notifText: notif,
+      timestamp: Date.now()
+    });
+
+    saveState([...teams, created], tournaments, matches, notif);
     setNewTeam({ name: '', primaryColor: '#10b981', secondaryColor: '#1f2937', badgeSymbol: 'ball', logoUrl: '' });
     setShowTeamModal(false);
   };
@@ -1362,6 +1542,12 @@ export default function App() {
         }));
         // Remove from matches
         const filteredMatches = matches.filter(m => m.teamAId !== id && m.teamBId !== id);
+
+        realtimeSync.publishAction({
+          type: 'TEAM_DELETE',
+          teamId: id,
+          timestamp: Date.now()
+        });
 
         saveState(filteredTeams, updatedTournaments, filteredMatches);
       }
@@ -1386,8 +1572,15 @@ export default function App() {
       visitorPassword: newTournament.visitorPassword.trim() || undefined
     };
 
-    saveState(teams, [...tournaments, created], matches);
-    sendNotification(`Nuevo torneo creado: ${created.name}`, created.id);
+    const notif = `Nuevo torneo creado: ${created.name}`;
+    realtimeSync.publishAction({
+      type: 'TOURNAMENT_CREATE',
+      tournament: created,
+      notifText: notif,
+      timestamp: Date.now()
+    });
+
+    saveState(teams, [...tournaments, created], matches, notif, created.id);
     setSelectedTournamentId(created.id);
     setNewTournament({ name: '', type: 'LIGA', numGroups: 2, numTeams: 8, faseFinalType: 'semis', logoUrl: '', adminPassword: '', visitorPassword: '' });
     setShowTournamentModal(false);
@@ -1407,6 +1600,13 @@ export default function App() {
         if (selectedTournamentId === id) {
           setSelectedTournamentId(null);
         }
+
+        realtimeSync.publishAction({
+          type: 'TOURNAMENT_DELETE',
+          tournamentId: id,
+          timestamp: Date.now()
+        });
+
         saveState(teams, updatedTours, updatedMatches);
       }
     );
@@ -1674,23 +1874,27 @@ export default function App() {
       updated = [...matches, newMatch];
     }
 
-    saveState(teams, tournaments, updated);
-
-    // Send notifications
     const tour = tournaments.find(t => t.id === editingMatchDetails.tournamentId);
     const teamA = teams.find(t => t.id === matchDetailsState.teamAId)?.name || 'Equipo A';
     const teamB = teams.find(t => t.id === matchDetailsState.teamBId)?.name || 'Equipo B';
-    if (tour) {
-      if (isPlayed) {
-        let penText = "";
-        if (penA !== null && penB !== null) {
-          penText = ` (Pen: ${penA} - ${penB})`;
-        }
-        sendNotification(`Actualización del torneo ${tour.name}: Se actualizó el resultado: ${teamA} ${sA} - ${sB} ${teamB}${penText}`, tour.id);
-      } else {
-        sendNotification(`Actualización del torneo ${tour.name}: Se modificaron los detalles del partido ${teamA} vs ${teamB}`, tour.id);
-      }
-    }
+
+    const notifText = tour ? (
+      isPlayed ? (
+        `Actualización del torneo ${tour.name}: Se actualizó el resultado: ${teamA} ${sA} - ${sB} ${teamB}${penA !== null && penB !== null ? ` (Pen: ${penA} - ${penB})` : ''}`
+      ) : (
+        `Actualización del torneo ${tour.name}: Se modificaron los detalles del partido ${teamA} vs ${teamB}`
+      )
+    ) : undefined;
+
+    realtimeSync.publishAction({
+      type: 'MATCHES_UPDATE',
+      tournamentId: editingMatchDetails.tournamentId,
+      matches: updated.filter(m => m.tournamentId === editingMatchDetails.tournamentId),
+      notifText,
+      timestamp: Date.now()
+    });
+
+    saveState(teams, tournaments, updated, notifText, editingMatchDetails.tournamentId);
 
     setEditingMatchDetails(null);
   };
@@ -2010,6 +2214,15 @@ export default function App() {
         notifText = `Actualización del torneo ${scoreTour.name}: Se reinició el marcador de ${teamA} vs ${teamB}`;
       }
     }
+
+    // Instant delta action broadcast across all devices
+    realtimeSync.publishAction({
+      type: 'MATCHES_UPDATE',
+      tournamentId: editingMatch.tournamentId,
+      matches: updatedMatches.filter(m => m.tournamentId === editingMatch.tournamentId),
+      notifText: notifText || undefined,
+      timestamp: Date.now()
+    });
 
     saveState(teams, tournaments, updatedMatches, notifText || undefined, scoreTour?.id);
     setEditingMatch(null);
