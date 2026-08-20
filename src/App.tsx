@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Trophy, Shield, Calendar, Plus, Trash2, Edit2, Share2, Lock, LogOut, 
   Download, Upload, Info, Users, Check, ArrowRight, Sparkles, RefreshCw, Smartphone,
-  Star, Crown, Zap, Eye, EyeOff, Bell, Clock, MapPin
+  Star, Crown, Zap, Eye, EyeOff, Bell, Clock, MapPin, Wand2, Layers, Settings, ChevronRight
 } from 'lucide-react';
 
 import { auth, db } from './lib/firebase';
@@ -83,6 +83,18 @@ export interface Match {
   time?: string;
   venue?: string;
   overrideTeams?: any;
+  label?: string; // Custom description of the matchup, e.g. "1ro Grupo A VS 4to Grupo C"
+  sourceA?: string; // e.g. "A_1", "C_4", "BEST_3_1"
+  sourceB?: string; // e.g. "C_4", "A_1"
+}
+
+export interface BracketPairingRule {
+  id: string;
+  sourceA: string; // e.g. 'A_1', 'C_4', 'BEST_3_1', 'LIGA_1', 'TEAM:123', 'TBD'
+  sourceB: string; // e.g. 'C_4', 'A_1'
+  customLabel?: string;
+  time?: string;
+  venue?: string;
 }
 
 export interface AppNotification {
@@ -274,6 +286,14 @@ export default function App() {
   const [showAutoLlaveModal, setShowAutoLlaveModal] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [autoPhaseName, setAutoPhaseName] = useState('Octavos de Final');
+
+  // Custom Llaves / Bracket Builder state
+  const [showBracketBuilderModal, setShowBracketBuilderModal] = useState(false);
+  const [bracketBuilderPhaseName, setBracketBuilderPhaseName] = useState('Octavos de Final');
+  const [bracketBuilderRules, setBracketBuilderRules] = useState<BracketPairingRule[]>([]);
+  const [bracketBuilderSelectedTemplate, setBracketBuilderSelectedTemplate] = useState<string>('');
+  const [bracketTemplateCategoryFilter, setBracketTemplateCategoryFilter] = useState<string>('ALL');
+  const [bracketBuilderReplaceExisting, setBracketBuilderReplaceExisting] = useState(false);
 
   // Bracket pairing modal states
   const [showBracketPairingModal, setShowBracketPairingModal] = useState(false);
@@ -468,16 +488,36 @@ export default function App() {
       if (!incoming || !isMounted) return;
 
       if (Array.isArray(incoming.tournaments)) {
-        setTournaments(incoming.tournaments);
-        try {
-          localStorage.setItem('playgol_tournaments_cache', JSON.stringify(incoming.tournaments));
-        } catch {}
+        setTournaments(prevTours => {
+          const mergedTours = incoming.tournaments.map((inTour: any) => {
+            const existing = prevTours.find(t => t.id === inTour.id);
+            // If local state already had a custom logoUrl and incoming has empty/undefined, preserve it!
+            if (existing && existing.logoUrl && !inTour.logoUrl) {
+              return { ...inTour, logoUrl: existing.logoUrl };
+            }
+            return inTour;
+          });
+          try {
+            localStorage.setItem('playgol_tournaments_cache', JSON.stringify(mergedTours));
+          } catch {}
+          return mergedTours;
+        });
       }
       if (Array.isArray(incoming.teams)) {
-        setTeams(incoming.teams);
-        try {
-          localStorage.setItem('playgol_teams_cache', JSON.stringify(incoming.teams));
-        } catch {}
+        setTeams(prevTeams => {
+          const mergedTeams = incoming.teams.map((inTeam: any) => {
+            const existing = prevTeams.find(t => t.id === inTeam.id);
+            // If local state already had a custom logoUrl and incoming has empty/undefined, preserve it!
+            if (existing && existing.logoUrl && !inTeam.logoUrl) {
+              return { ...inTeam, logoUrl: existing.logoUrl };
+            }
+            return inTeam;
+          });
+          try {
+            localStorage.setItem('playgol_teams_cache', JSON.stringify(mergedTeams));
+          } catch {}
+          return mergedTeams;
+        });
       }
       if (Array.isArray(incoming.matches)) {
         setMatches(incoming.matches);
@@ -1144,14 +1184,14 @@ export default function App() {
     }
   };
 
-  // --- IMAGE UPLOAD HELPER (downscales to save bandwidth and ensure instant real-time sync) ---
-  const compressAndUploadImage = (file: File, callback: (base64: string) => void) => {
+  // --- IMAGE UPLOAD HELPER (downscales to optimal compact Base64 Data URL stored permanently in Firestore Cloud DB) ---
+  const compressAndUploadImage = (file: File, callback: (imageUrl: string) => void) => {
     const reader = new FileReader();
     reader.onload = (event) => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_SIZE = 128;
+        const MAX_SIZE = 160; // Crisp resolution for club shields and tournament logos
         let width = img.width;
         let height = img.height;
 
@@ -1172,17 +1212,19 @@ export default function App() {
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.clearRect(0, 0, width, height);
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
           ctx.drawImage(img, 0, 0, width, height);
-          // Prefer PNG or WebP with transparency for crisp football club badges
-          let compressedBase64 = canvas.toDataURL('image/png');
-          // If PNG is slightly large (> 50KB), fallback to high quality webp
-          if (compressedBase64.length > 50000) {
-            const webp = canvas.toDataURL('image/webp', 0.85);
-            if (webp.startsWith('data:image/webp')) {
-              compressedBase64 = webp;
-            }
+
+          // Try webp first for maximum compression quality with alpha channel (~6KB - 15KB)
+          let dataUrl = canvas.toDataURL('image/webp', 0.88);
+          if (!dataUrl.startsWith('data:image/webp') || dataUrl.length < 100) {
+            dataUrl = canvas.toDataURL('image/png');
           }
-          callback(compressedBase64);
+          // The base64 data URI is stored directly in the Firestore database document,
+          // which ensures 100% permanent persistence across cloud deployments, container restarts,
+          // and all mobile/desktop devices without depending on ephemeral local disk files.
+          callback(dataUrl);
         }
       };
       img.src = event.target?.result as string;
@@ -1904,167 +1946,697 @@ export default function App() {
     setEditingMatchDetails(null);
   };
 
-  // --- AUTO LLAVES GENERATION SYSTEM FOR GROUPS ---
-  const getPairingTemplates = (numGroups: number) => {
-    if (numGroups === 2) {
-      return [
-        { id: '2g_semi', name: 'Semifinal Cruzada (4 equipos: 1ro vs 2do)', phaseName: 'Semifinales' },
-        { id: '2g_cuartos', name: 'Cuartos de Final Cruzados (8 equipos: 1ro vs 4to, 2do vs 3ro)', phaseName: 'Cuartos de Final' },
-        { id: '2g_cuartos_3ro', name: 'Cuartos con Mejores Terceros (8 equipos: 1ro vs Mejor 3ro, etc.)', phaseName: 'Cuartos de Final' }
-      ];
-    } else if (numGroups === 3) {
-      return [
-        { id: '3g_semi', name: 'Semifinal: 1ros de grupo + 1 Mejor Tercero (4 equipos)', phaseName: 'Semifinales' },
-        { id: '3g_cuartos', name: 'Cuartos: 1ros, 2dos de grupo + 2 Mejores Terceros (8 equipos)', phaseName: 'Cuartos de Final' }
-      ];
-    } else if (numGroups === 4) {
-      return [
-        { id: '4g_cuartos', name: 'Cuartos Cruzados: 1ro vs 2do (8 equipos)', phaseName: 'Cuartos de Final' },
-        { id: '4g_cuartos_3ro', name: 'Cuartos: 1ros vs 4 Mejores Terceros (8 equipos)', phaseName: 'Cuartos de Final' },
-        { id: '4g_octavos', name: 'Octavos Cruzados: 1ro vs 4to, 2do vs 3ro (16 equipos)', phaseName: 'Octavos de Final' }
+  // --- RESOLVE ANY BRACKET SOURCE TO REAL-TIME STANDINGS TEAM ---
+  const resolveBracketSource = (
+    tourId: string,
+    sourceKey: string
+  ): { teamId: string; team?: Team; label: string; stats?: string; isQualified: boolean } => {
+    if (!sourceKey || sourceKey === 'TBD') {
+      return { teamId: '', label: 'Por definir (TBD)', isQualified: false };
+    }
+
+    if (sourceKey.startsWith('TEAM:')) {
+      const tId = sourceKey.replace('TEAM:', '');
+      const t = teams.find(x => x.id === tId);
+      return { teamId: tId, team: t, label: t?.name || 'Equipo Asignado', isQualified: Boolean(t) };
+    }
+
+    if (sourceKey.startsWith('LIGA_')) {
+      const rank = parseInt(sourceKey.replace('LIGA_', ''), 10);
+      const standings = calculateStandings(tourId);
+      const row = standings[rank - 1];
+      const team = row ? teams.find(t => t.id === row.teamId) : undefined;
+      const label = `${rank}º Lugar Liga`;
+      const stats = row && row.played > 0 ? `${row.points} pts | DG: ${row.goalDifference > 0 ? `+${row.goalDifference}` : row.goalDifference}` : undefined;
+      return {
+        teamId: row?.teamId || '',
+        team,
+        label,
+        stats,
+        isQualified: Boolean(row && row.played > 0)
+      };
+    }
+
+    if (sourceKey.startsWith('BEST_')) {
+      // e.g. BEST_3_1 -> 1er Mejor 3ro
+      const parts = sourceKey.split('_');
+      const targetGroupPos = parseInt(parts[1], 10);
+      const bestIndex = parseInt(parts[2], 10) - 1;
+
+      const tour = tournaments.find(t => t.id === tourId);
+      const numGroups = tour?.numGroups || 2;
+      const groupsList = Array.from({ length: numGroups }, (_, i) => String.fromCharCode(65 + i));
+
+      const candidates = groupsList.map(g => {
+        const std = calculateStandings(tourId, g);
+        return std && std.length >= targetGroupPos
+          ? { group: g, teamId: std[targetGroupPos - 1].teamId, row: std[targetGroupPos - 1] }
+          : null;
+      }).filter((x): x is { group: string; teamId: string; row: StandingRow } => x !== null);
+
+      candidates.sort((a, b) => {
+        if (b.row.points !== a.row.points) return b.row.points - a.row.points;
+        if (b.row.goalDifference !== a.row.goalDifference) return b.row.goalDifference - a.row.goalDifference;
+        return b.row.goalsFor - a.row.goalsFor;
+      });
+
+      const targetCandidate = candidates[bestIndex];
+      const team = targetCandidate ? teams.find(t => t.id === targetCandidate.teamId) : undefined;
+      const ordinals = ['1er', '2do', '3er', '4to', '5to', '6to'];
+      const label = `${ordinals[bestIndex] || `${bestIndex + 1}º`} Mejor ${targetGroupPos}º`;
+      const stats = targetCandidate && targetCandidate.row.played > 0 
+        ? `(Gr. ${targetCandidate.group} - ${targetCandidate.row.points} pts)` 
+        : undefined;
+
+      return {
+        teamId: targetCandidate?.teamId || '',
+        team,
+        label,
+        stats,
+        isQualified: Boolean(targetCandidate && targetCandidate.row.played > 0)
+      };
+    }
+
+    // Format: "A_1", "C_4", etc.
+    const match = sourceKey.match(/^([A-H])_(\d+)$/);
+    if (match) {
+      const group = match[1];
+      const rank = parseInt(match[2], 10);
+      const standings = calculateStandings(tourId, group);
+      const row = standings[rank - 1];
+      const team = row ? teams.find(t => t.id === row.teamId) : undefined;
+      const ordinals = ['1ro', '2do', '3ro', '4to', '5to', '6to', '7mo', '8vo'];
+      const label = `${ordinals[rank - 1] || `${rank}º`} Grupo ${group}`;
+      const stats = row && row.played > 0 
+        ? `${row.points} pts (DG: ${row.goalDifference > 0 ? `+${row.goalDifference}` : row.goalDifference})` 
+        : undefined;
+
+      return {
+        teamId: row?.teamId || '',
+        team,
+        label,
+        stats,
+        isQualified: Boolean(row && row.played > 0)
+      };
+    }
+
+    return { teamId: '', label: sourceKey, isQualified: false };
+  };
+
+  // --- AVAILABLE SOURCES FOR CRUCES SELECTORS ---
+  const getAvailableBracketSources = (tour: Tournament) => {
+    const options: { value: string; label: string; group: string }[] = [];
+
+    if (tour.type === 'GRUPOS') {
+      const numGroups = tour.numGroups || 2;
+      const groupsList = Array.from({ length: numGroups }, (_, i) => String.fromCharCode(65 + i));
+
+      // 1. Group positions
+      groupsList.forEach(g => {
+        const groupTeamsCount = tour.teams.filter(tt => tt.group === g).length || 6;
+        const maxPos = Math.min(Math.max(groupTeamsCount, 4), 8);
+        const ordinals = ['1ro', '2do', '3ro', '4to', '5to', '6to', '7mo', '8vo'];
+        for (let pos = 1; pos <= maxPos; pos++) {
+          options.push({
+            value: `${g}_${pos}`,
+            label: `${ordinals[pos - 1] || `${pos}º`} Grupo ${g}`,
+            group: `Posiciones Grupo ${g}`
+          });
+        }
+      });
+
+      // 2. Best Seconds
+      options.push(
+        { value: 'BEST_2_1', label: '1er Mejor 2do Lugar', group: 'Mejores Clasificados Globales' },
+        { value: 'BEST_2_2', label: '2do Mejor 2do Lugar', group: 'Mejores Clasificados Globales' }
+      );
+
+      // 3. Best Thirds
+      options.push(
+        { value: 'BEST_3_1', label: '1er Mejor 3er Lugar', group: 'Mejores Clasificados Globales' },
+        { value: 'BEST_3_2', label: '2do Mejor 3er Lugar', group: 'Mejores Clasificados Globales' },
+        { value: 'BEST_3_3', label: '3er Mejor 3er Lugar', group: 'Mejores Clasificados Globales' },
+        { value: 'BEST_3_4', label: '4to Mejor 3er Lugar', group: 'Mejores Clasificados Globales' }
+      );
+
+      // 4. Best Fourths
+      options.push(
+        { value: 'BEST_4_1', label: '1er Mejor 4to Lugar', group: 'Mejores Clasificados Globales' },
+        { value: 'BEST_4_2', label: '2do Mejor 4to Lugar', group: 'Mejores Clasificados Globales' }
+      );
+    } else if (tour.type === 'LIGA') {
+      const teamCount = tour.teams.length || tour.numTeams || 8;
+      for (let i = 1; i <= Math.min(teamCount, 16); i++) {
+        options.push({
+          value: `LIGA_${i}`,
+          label: `${i}º Lugar Tabla General`,
+          group: 'Posiciones Liga'
+        });
+      }
+    }
+
+    // Direct club options
+    const tourTeams = tour.teams || [];
+    tourTeams.forEach(tt => {
+      const team = teams.find(t => t.id === tt.teamId);
+      if (team) {
+        options.push({
+          value: `TEAM:${team.id}`,
+          label: `Club: ${team.name}`,
+          group: 'Equipos Registrados'
+        });
+      }
+    });
+
+    options.push({
+      value: 'TBD',
+      label: 'Por definir (TBD)',
+      group: 'Otro'
+    });
+
+    return options;
+  };
+
+  // --- BRACKET TEMPLATES ---
+  const getBracketTemplates = (tour: Tournament) => {
+    const templates: {
+      id: string;
+      category: 'OCTAVOS' | 'FINAL_DIRECTA' | 'SEGUNDA_FASE' | 'CUARTOS' | 'SEMIS';
+      name: string;
+      phaseName: string;
+      description: string;
+      rules: { sourceA: string; sourceB: string; customLabel?: string }[];
+    }[] = [];
+
+    const isGrupos = tour.type === 'GRUPOS';
+    const numGroups = tour.numGroups || 2;
+
+    // ==========================================
+    // 1. OCTAVOS DE FINAL (8 LLAVES / 16 EQUIPOS)
+    // ==========================================
+    if (isGrupos && numGroups >= 4) {
+      templates.push({
+        id: 'octavos_ac_bd',
+        category: 'OCTAVOS',
+        name: 'Octavos de Final: Grupos A vs C y B vs D (8 Llaves)',
+        phaseName: 'Octavos de Final',
+        description: '1ro A vs 4to C, 2do A vs 3ro C, 3ro A vs 2do C, 4to A vs 1ro C | 1ro B vs 4to D, 2do B vs 3ro D...',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'C_4', customLabel: '1ro Grupo A VS 4to Grupo C' },
+          { sourceA: 'A_2', sourceB: 'C_3', customLabel: '2do Grupo A VS 3ro Grupo C' },
+          { sourceA: 'A_3', sourceB: 'C_2', customLabel: '3ro Grupo A VS 2do Grupo C' },
+          { sourceA: 'A_4', sourceB: 'C_1', customLabel: '4to Grupo A VS 1ro Grupo C' },
+          { sourceA: 'B_1', sourceB: 'D_4', customLabel: '1ro Grupo B VS 4to Grupo D' },
+          { sourceA: 'B_2', sourceB: 'D_3', customLabel: '2do Grupo B VS 3ro Grupo D' },
+          { sourceA: 'B_3', sourceB: 'D_2', customLabel: '3ro Grupo B VS 2do Grupo D' },
+          { sourceA: 'B_4', sourceB: 'D_1', customLabel: '4to Grupo B VS 1ro Grupo D' }
+        ]
+      });
+
+      templates.push({
+        id: 'octavos_ab_cd',
+        category: 'OCTAVOS',
+        name: 'Octavos de Final: Grupos A vs B y C vs D (8 Llaves)',
+        phaseName: 'Octavos de Final',
+        description: '1ro A vs 4to B, 2do A vs 3ro B, 3ro A vs 2do B, 4to A vs 1ro B | 1ro C vs 4to D, 2do C vs 3ro D...',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'B_4', customLabel: '1ro Grupo A VS 4to Grupo B' },
+          { sourceA: 'A_2', sourceB: 'B_3', customLabel: '2do Grupo A VS 3ro Grupo B' },
+          { sourceA: 'A_3', sourceB: 'B_2', customLabel: '3ro Grupo A VS 2do Grupo B' },
+          { sourceA: 'A_4', sourceB: 'B_1', customLabel: '4to Grupo A VS 1ro Grupo B' },
+          { sourceA: 'C_1', sourceB: 'D_4', customLabel: '1ro Grupo C VS 4to Grupo D' },
+          { sourceA: 'C_2', sourceB: 'D_3', customLabel: '2do Grupo C VS 3ro Grupo D' },
+          { sourceA: 'C_3', sourceB: 'D_2', customLabel: '3ro Grupo C VS 2do Grupo D' },
+          { sourceA: 'C_4', sourceB: 'D_1', customLabel: '4to Grupo C VS 1ro Grupo D' }
+        ]
+      });
+
+      templates.push({
+        id: 'octavos_3ro_4to',
+        category: 'OCTAVOS',
+        name: 'Octavos de Final: Con Mejores 3ros y 4tos (8 Llaves)',
+        phaseName: 'Octavos de Final',
+        description: '1ros vs Mejores 4tos y Mejores 3ros clasificados',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'BEST_4_1', customLabel: '1ro Grupo A VS 1er Mejor 4to' },
+          { sourceA: 'B_1', sourceB: 'BEST_4_2', customLabel: '1ro Grupo B VS 2do Mejor 4to' },
+          { sourceA: 'C_1', sourceB: 'BEST_3_1', customLabel: '1ro Grupo C VS 1er Mejor 3ro' },
+          { sourceA: 'D_1', sourceB: 'BEST_3_2', customLabel: '1ro Grupo D VS 2do Mejor 3ro' },
+          { sourceA: 'A_2', sourceB: 'BEST_3_3', customLabel: '2do Grupo A VS 3er Mejor 3ro' },
+          { sourceA: 'B_2', sourceB: 'BEST_3_4', customLabel: '2do Grupo B VS 4to Mejor 3ro' },
+          { sourceA: 'C_2', sourceB: 'D_3', customLabel: '2do Grupo C VS 3ro Grupo D' },
+          { sourceA: 'D_2', sourceB: 'C_3', customLabel: '2do Grupo D VS 3ro Grupo C' }
+        ]
+      });
+    } else if (isGrupos && numGroups === 2) {
+      templates.push({
+        id: '2g_octavos',
+        category: 'OCTAVOS',
+        name: 'Octavos de Final: 8 Clasificados por Grupo (8 Llaves)',
+        phaseName: 'Octavos de Final',
+        description: '1ro A vs 8vo B, 2do A vs 7mo B, 3ro A vs 6to B, 4to A vs 5to B | 1ro B vs 8vo A...',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'B_8', customLabel: '1ro Grupo A VS 8vo Grupo B' },
+          { sourceA: 'A_2', sourceB: 'B_7', customLabel: '2do Grupo A VS 7mo Grupo B' },
+          { sourceA: 'A_3', sourceB: 'B_6', customLabel: '3ro Grupo A VS 6to Grupo B' },
+          { sourceA: 'A_4', sourceB: 'B_5', customLabel: '4to Grupo A VS 5to Grupo B' },
+          { sourceA: 'B_1', sourceB: 'A_8', customLabel: '1ro Grupo B VS 8vo Grupo A' },
+          { sourceA: 'B_2', sourceB: 'A_7', customLabel: '2do Grupo B VS 7mo Grupo A' },
+          { sourceA: 'B_3', sourceB: 'A_6', customLabel: '3ro Grupo B VS 6to Grupo A' },
+          { sourceA: 'B_4', sourceB: 'A_5', customLabel: '4to Grupo B VS 5to Grupo A' }
+        ]
+      });
+    } else {
+      templates.push({
+        id: 'liga_octavos',
+        category: 'OCTAVOS',
+        name: 'Octavos de Final: Top 16 Tabla General (8 Llaves)',
+        phaseName: 'Octavos de Final',
+        description: '1ro vs 16vo, 2do vs 15vo, 3ro vs 14vo, 4to vs 13vo, 5to vs 12vo, 6to vs 11vo, 7mo vs 10mo, 8vo vs 9no',
+        rules: [
+          { sourceA: 'LIGA_1', sourceB: 'LIGA_16', customLabel: '1er Lugar VS 16º Lugar' },
+          { sourceA: 'LIGA_2', sourceB: 'LIGA_15', customLabel: '2do Lugar VS 15º Lugar' },
+          { sourceA: 'LIGA_3', sourceB: 'LIGA_14', customLabel: '3er Lugar VS 14º Lugar' },
+          { sourceA: 'LIGA_4', sourceB: 'LIGA_13', customLabel: '4to Lugar VS 13º Lugar' },
+          { sourceA: 'LIGA_5', sourceB: 'LIGA_12', customLabel: '5to Lugar VS 12º Lugar' },
+          { sourceA: 'LIGA_6', sourceB: 'LIGA_11', customLabel: '6to Lugar VS 11º Lugar' },
+          { sourceA: 'LIGA_7', sourceB: 'LIGA_10', customLabel: '7mo Lugar VS 10º Lugar' },
+          { sourceA: 'LIGA_8', sourceB: 'LIGA_9', customLabel: '8vo Lugar VS 9no Lugar' }
+        ]
+      });
+    }
+
+    // ==========================================
+    // 2. FINAL DIRECTA (1 O 2 LLAVES)
+    // ==========================================
+    if (isGrupos) {
+      templates.push({
+        id: 'final_directa_1partido',
+        category: 'FINAL_DIRECTA',
+        name: 'Gran Final Directa: 1ro Grupo A vs 1ro Grupo B (1 Llave)',
+        phaseName: 'Final Directa',
+        description: 'Campeón a partido único entre los punteros de grupo',
+        rules: [
+          { sourceA: 'A_1', sourceB: numGroups >= 2 ? 'B_1' : 'A_2', customLabel: '🏆 GRAN FINAL: 1ro Grupo A VS 1ro Grupo B' }
+        ]
+      });
+
+      templates.push({
+        id: 'final_directa_y_3ero',
+        category: 'FINAL_DIRECTA',
+        name: 'Final Directa y Partido por el 3er Puesto (2 Llaves)',
+        phaseName: 'Final Directa',
+        description: 'Gran Final por el título (1ros) y Partido por el 3er Lugar (2dos)',
+        rules: [
+          { sourceA: 'A_1', sourceB: numGroups >= 2 ? 'B_1' : 'A_2', customLabel: '🏆 GRAN FINAL: 1ro Grupo A VS 1ro Grupo B' },
+          { sourceA: 'A_2', sourceB: numGroups >= 2 ? 'B_2' : 'A_3', customLabel: '🥉 3er PUESTO: 2do Grupo A VS 2do Grupo B' }
+        ]
+      });
+    } else {
+      templates.push({
+        id: 'final_directa_liga',
+        category: 'FINAL_DIRECTA',
+        name: 'Gran Final Directa: 1er vs 2do Lugar (1 Llave)',
+        phaseName: 'Final Directa',
+        description: '1er Lugar Tabla General vs 2do Lugar Tabla General',
+        rules: [
+          { sourceA: 'LIGA_1', sourceB: 'LIGA_2', customLabel: '🏆 GRAN FINAL: 1er Lugar VS 2do Lugar' }
+        ]
+      });
+
+      templates.push({
+        id: 'final_directa_liga_top4',
+        category: 'FINAL_DIRECTA',
+        name: 'Final Directa y 3er Puesto: Top 4 (2 Llaves)',
+        phaseName: 'Final Directa',
+        description: 'Gran Final (1ro vs 2do) y Partido por el 3er Lugar (3ro vs 4to)',
+        rules: [
+          { sourceA: 'LIGA_1', sourceB: 'LIGA_2', customLabel: '🏆 GRAN FINAL: 1er Lugar VS 2do Lugar' },
+          { sourceA: 'LIGA_3', sourceB: 'LIGA_4', customLabel: '🥉 3er PUESTO: 3er Lugar VS 4to Lugar' }
+        ]
+      });
+    }
+
+    // ==========================================
+    // 3. SEGUNDA FASE (4 U 8 LLAVES)
+    // ==========================================
+    if (isGrupos && numGroups >= 4) {
+      templates.push({
+        id: 'segunda_fase_clasificados',
+        category: 'SEGUNDA_FASE',
+        name: 'Segunda Fase: Cruces Eliminatorios Directos (4 Llaves)',
+        phaseName: 'Segunda Fase',
+        description: '1ro A vs 2do B, 1ro B vs 2do A, 1ro C vs 2do D, 1ro D vs 2do C',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'B_2', customLabel: 'Segunda Fase: 1ro Grupo A VS 2do Grupo B' },
+          { sourceA: 'B_1', sourceB: 'A_2', customLabel: 'Segunda Fase: 1ro Grupo B VS 2do Grupo A' },
+          { sourceA: 'C_1', sourceB: 'D_2', customLabel: 'Segunda Fase: 1ro Grupo C VS 2do Grupo D' },
+          { sourceA: 'D_1', sourceB: 'C_2', customLabel: 'Segunda Fase: 1ro Grupo D VS 2do Grupo C' }
+        ]
+      });
+
+      templates.push({
+        id: 'segunda_fase_repechaje',
+        category: 'SEGUNDA_FASE',
+        name: 'Segunda Fase: Repechaje y Reclasificación (4 Llaves)',
+        phaseName: 'Segunda Fase',
+        description: '3ro A vs 4to B, 3ro B vs 4to A, 3ro C vs 4to D, 3ro D vs 4to C',
+        rules: [
+          { sourceA: 'A_3', sourceB: 'B_4', customLabel: 'Segunda Fase: 3ro Grupo A VS 4to Grupo B' },
+          { sourceA: 'B_3', sourceB: 'A_4', customLabel: 'Segunda Fase: 3ro Grupo B VS 4to Grupo A' },
+          { sourceA: 'C_3', sourceB: 'D_4', customLabel: 'Segunda Fase: 3ro Grupo C VS 4to Grupo D' },
+          { sourceA: 'D_3', sourceB: 'C_4', customLabel: 'Segunda Fase: 3ro Grupo D VS 4to Grupo C' }
+        ]
+      });
+
+      templates.push({
+        id: 'segunda_fase_8llaves',
+        category: 'SEGUNDA_FASE',
+        name: 'Segunda Fase: Llaves de Ida Grupos A-C y B-D (8 Llaves)',
+        phaseName: 'Segunda Fase',
+        description: '1ro A vs 4to C, 2do A vs 3ro C, 3ro A vs 2do C, 4to A vs 1ro C | 1ro B vs 4to D...',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'C_4', customLabel: 'Segunda Fase: 1ro Grupo A VS 4to Grupo C' },
+          { sourceA: 'A_2', sourceB: 'C_3', customLabel: 'Segunda Fase: 2do Grupo A VS 3ro Grupo C' },
+          { sourceA: 'A_3', sourceB: 'C_2', customLabel: 'Segunda Fase: 3ro Grupo A VS 2do Grupo C' },
+          { sourceA: 'A_4', sourceB: 'C_1', customLabel: 'Segunda Fase: 4to Grupo A VS 1ro Grupo C' },
+          { sourceA: 'B_1', sourceB: 'D_4', customLabel: 'Segunda Fase: 1ro Grupo B VS 4to Grupo D' },
+          { sourceA: 'B_2', sourceB: 'D_3', customLabel: 'Segunda Fase: 2do Grupo B VS 3ro Grupo D' },
+          { sourceA: 'B_3', sourceB: 'D_2', customLabel: 'Segunda Fase: 3ro Grupo B VS 2do Grupo D' },
+          { sourceA: 'B_4', sourceB: 'D_1', customLabel: 'Segunda Fase: 4to Grupo B VS 1ro Grupo D' }
+        ]
+      });
+    } else if (isGrupos && numGroups === 2) {
+      templates.push({
+        id: 'segunda_fase_2g_4llaves',
+        category: 'SEGUNDA_FASE',
+        name: 'Segunda Fase: Cruces Clasificados (4 Llaves)',
+        phaseName: 'Segunda Fase',
+        description: '1ro A vs 4to B, 2do A vs 3ro B, 1ro B vs 4to A, 2do B vs 3ro A',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'B_4', customLabel: 'Segunda Fase: 1ro Grupo A VS 4to Grupo B' },
+          { sourceA: 'A_2', sourceB: 'B_3', customLabel: 'Segunda Fase: 2do Grupo A VS 3ro Grupo B' },
+          { sourceA: 'B_1', sourceB: 'A_4', customLabel: 'Segunda Fase: 1ro Grupo B VS 4to Grupo A' },
+          { sourceA: 'B_2', sourceB: 'A_3', customLabel: 'Segunda Fase: 2do Grupo B VS 3ro Grupo A' }
+        ]
+      });
+    } else {
+      templates.push({
+        id: 'segunda_fase_liga',
+        category: 'SEGUNDA_FASE',
+        name: 'Segunda Fase: Cruces Directos Top 8 (4 Llaves)',
+        phaseName: 'Segunda Fase',
+        description: '1ro vs 8vo, 2do vs 7mo, 3ro vs 6to, 4to vs 5to',
+        rules: [
+          { sourceA: 'LIGA_1', sourceB: 'LIGA_8', customLabel: 'Segunda Fase: 1er Lugar VS 8vo Lugar' },
+          { sourceA: 'LIGA_2', sourceB: 'LIGA_7', customLabel: 'Segunda Fase: 2do Lugar VS 7mo Lugar' },
+          { sourceA: 'LIGA_3', sourceB: 'LIGA_6', customLabel: 'Segunda Fase: 3er Lugar VS 6to Lugar' },
+          { sourceA: 'LIGA_4', sourceB: 'LIGA_5', customLabel: 'Segunda Fase: 4to Lugar VS 5to Lugar' }
+        ]
+      });
+    }
+
+    // ==========================================
+    // 4. CUARTOS DE FINAL (4 LLAVES)
+    // ==========================================
+    if (isGrupos && numGroups >= 4) {
+      templates.push({
+        id: 'cuartos_clasicos_4g',
+        category: 'CUARTOS',
+        name: 'Cuartos de Final Clásicos: 1ro vs 2do Cruzados (4 Llaves)',
+        phaseName: 'Cuartos de Final',
+        description: '1ro A vs 2do B, 1ro B vs 2do A, 1ro C vs 2do D, 1ro D vs 2do C',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'B_2', customLabel: '1ro Grupo A VS 2do Grupo B' },
+          { sourceA: 'B_1', sourceB: 'A_2', customLabel: '1ro Grupo B VS 2do Grupo A' },
+          { sourceA: 'C_1', sourceB: 'D_2', customLabel: '1ro Grupo C VS 2do Grupo D' },
+          { sourceA: 'D_1', sourceB: 'C_2', customLabel: '1ro Grupo D VS 2do Grupo C' }
+        ]
+      });
+
+      templates.push({
+        id: 'cuartos_mejores_3ros',
+        category: 'CUARTOS',
+        name: 'Cuartos de Final: 1ros vs 4 Mejores Terceros (4 Llaves)',
+        phaseName: 'Cuartos de Final',
+        description: '1ro A vs 4to Mejor 3ro, 1ro B vs 3er Mejor 3ro, 1ro C vs 2do Mejor 3ro, 1ro D vs 1er Mejor 3ro',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'BEST_3_4', customLabel: '1ro Grupo A VS 4to Mejor 3ro' },
+          { sourceA: 'B_1', sourceB: 'BEST_3_3', customLabel: '1ro Grupo B VS 3er Mejor 3ro' },
+          { sourceA: 'C_1', sourceB: 'BEST_3_2', customLabel: '1ro Grupo C VS 2do Mejor 3ro' },
+          { sourceA: 'D_1', sourceB: 'BEST_3_1', customLabel: '1ro Grupo D VS 1er Mejor 3ro' }
+        ]
+      });
+    } else if (isGrupos && numGroups === 2) {
+      templates.push({
+        id: 'cuartos_clasicos_2g',
+        category: 'CUARTOS',
+        name: 'Cuartos de Final: 1ro vs 4to y 2do vs 3ro Cruzados (4 Llaves)',
+        phaseName: 'Cuartos de Final',
+        description: '1ro A vs 4to B, 2do A vs 3ro B, 1ro B vs 4to A, 2do B vs 3ro A',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'B_4', customLabel: '1ro Grupo A VS 4to Grupo B' },
+          { sourceA: 'A_2', sourceB: 'B_3', customLabel: '2do Grupo A VS 3ro Grupo B' },
+          { sourceA: 'B_1', sourceB: 'A_4', customLabel: '1ro Grupo B VS 4to Grupo A' },
+          { sourceA: 'B_2', sourceB: 'A_3', customLabel: '2do Grupo B VS 3ro Grupo A' }
+        ]
+      });
+    } else {
+      templates.push({
+        id: 'cuartos_liga',
+        category: 'CUARTOS',
+        name: 'Cuartos de Final: Top 8 Cruzados (4 Llaves)',
+        phaseName: 'Cuartos de Final',
+        description: '1ro vs 8vo, 2do vs 7mo, 3ro vs 6to, 4to vs 5to',
+        rules: [
+          { sourceA: 'LIGA_1', sourceB: 'LIGA_8', customLabel: '1er Lugar VS 8vo Lugar' },
+          { sourceA: 'LIGA_2', sourceB: 'LIGA_7', customLabel: '2do Lugar VS 7mo Lugar' },
+          { sourceA: 'LIGA_3', sourceB: 'LIGA_6', customLabel: '3er Lugar VS 6to Lugar' },
+          { sourceA: 'LIGA_4', sourceB: 'LIGA_5', customLabel: '4to Lugar VS 5to Lugar' }
+        ]
+      });
+    }
+
+    // ==========================================
+    // 5. SEMIFINALES (2 LLAVES)
+    // ==========================================
+    if (isGrupos && numGroups >= 2) {
+      templates.push({
+        id: 'semis_cruzadas_grupos',
+        category: 'SEMIS',
+        name: 'Semifinales Cruzadas: 1ros vs 2dos (2 Llaves)',
+        phaseName: 'Semifinales',
+        description: '1ro Grupo A vs 2do Grupo B, 1ro Grupo B vs 2do Grupo A',
+        rules: [
+          { sourceA: 'A_1', sourceB: 'B_2', customLabel: '1ro Grupo A VS 2do Grupo B' },
+          { sourceA: 'B_1', sourceB: 'A_2', customLabel: '1ro Grupo B VS 2do Grupo A' }
+        ]
+      });
+    } else {
+      templates.push({
+        id: 'semis_liga',
+        category: 'SEMIS',
+        name: 'Semifinales: 1ro vs 4to y 2do vs 3ro (2 Llaves)',
+        phaseName: 'Semifinales',
+        description: '1er Lugar vs 4to Lugar, 2do Lugar vs 3er Lugar',
+        rules: [
+          { sourceA: 'LIGA_1', sourceB: 'LIGA_4', customLabel: '1er Lugar VS 4to Lugar' },
+          { sourceA: 'LIGA_2', sourceB: 'LIGA_3', customLabel: '2do Lugar VS 3er Lugar' }
+        ]
+      });
+    }
+
+    return templates;
+  };
+
+  const handleOpenBracketBuilder = (tour: Tournament) => {
+    if (!checkCanEdit(tour.id)) return;
+    const templates = getBracketTemplates(tour);
+    setBracketTemplateCategoryFilter('ALL');
+    if (templates.length > 0) {
+      const first = templates[0];
+      setBracketBuilderSelectedTemplate(first.id);
+      setBracketBuilderPhaseName(first.phaseName);
+      setBracketBuilderRules(first.rules.map((r, idx) => ({
+        id: `rule-${Date.now()}-${idx}`,
+        sourceA: r.sourceA,
+        sourceB: r.sourceB,
+        customLabel: r.customLabel || '',
+        time: '',
+        venue: ''
+      })));
+    } else {
+      setBracketBuilderSelectedTemplate('');
+      setBracketBuilderPhaseName('Fase Eliminatoria');
+      setBracketBuilderRules([
+        { id: `rule-${Date.now()}-0`, sourceA: 'TBD', sourceB: 'TBD', customLabel: '' }
+      ]);
+    }
+    setBracketBuilderReplaceExisting(false);
+    setShowBracketBuilderModal(true);
+  };
+
+  const handleApplyBracketTemplate = (templateId: string, tour?: Tournament) => {
+    const targetTour = tour || currentTour;
+    if (!targetTour) return;
+    const templates = getBracketTemplates(targetTour);
+    const selected = templates.find(t => t.id === templateId);
+    if (!selected) return;
+    setBracketBuilderSelectedTemplate(selected.id);
+    setBracketBuilderPhaseName(selected.phaseName);
+    setBracketBuilderRules(selected.rules.map((r, idx) => ({
+      id: `rule-${Date.now()}-${idx}`,
+      sourceA: r.sourceA,
+      sourceB: r.sourceB,
+      customLabel: r.customLabel || '',
+      time: '',
+      venue: ''
+    })));
+  };
+
+  const handleSelectPhaseNameQuick = (phase: string) => {
+    setBracketBuilderPhaseName(phase);
+    if (!currentTour) return;
+    const templates = getBracketTemplates(currentTour);
+
+    // Map phase name to category or template
+    let matchedCategory: 'OCTAVOS' | 'FINAL_DIRECTA' | 'SEGUNDA_FASE' | 'CUARTOS' | 'SEMIS' | 'ALL' = 'ALL';
+    const pLower = phase.toLowerCase();
+    if (pLower.includes('octav')) matchedCategory = 'OCTAVOS';
+    else if (pLower.includes('final') && !pLower.includes('semi') && !pLower.includes('cuart')) matchedCategory = 'FINAL_DIRECTA';
+    else if (pLower.includes('segunda') || pLower.includes('2da')) matchedCategory = 'SEGUNDA_FASE';
+    else if (pLower.includes('cuart')) matchedCategory = 'CUARTOS';
+    else if (pLower.includes('semi')) matchedCategory = 'SEMIS';
+
+    setBracketTemplateCategoryFilter(matchedCategory);
+
+    const matchingTmpl = templates.find(t =>
+      t.phaseName.toLowerCase() === pLower ||
+      (matchedCategory !== 'ALL' && t.category === matchedCategory)
+    );
+
+    if (matchingTmpl) {
+      handleApplyBracketTemplate(matchingTmpl.id, currentTour);
+    }
+  };
+
+  const handleSaveCustomBracketMatches = () => {
+    if (!currentTour || bracketBuilderRules.length === 0) return;
+
+    const phase = bracketBuilderPhaseName.trim() || 'Fase Eliminatoria';
+
+    const newMatches: Match[] = bracketBuilderRules.map((rule, idx) => {
+      const resA = resolveBracketSource(currentTour.id, rule.sourceA);
+      const resB = resolveBracketSource(currentTour.id, rule.sourceB);
+      const label = rule.customLabel || `${resA.label} VS ${resB.label}`;
+
+      return {
+        id: `m-llave-${Date.now()}-${idx}`,
+        tournamentId: currentTour.id,
+        teamAId: resA.teamId || '',
+        teamBId: resB.teamId || '',
+        scoreA: null,
+        scoreB: null,
+        played: false,
+        round: phase,
+        isLlave: true,
+        time: rule.time || undefined,
+        venue: rule.venue || undefined,
+        label,
+        sourceA: rule.sourceA,
+        sourceB: rule.sourceB
+      };
+    });
+
+    let updatedMatches: Match[];
+    if (bracketBuilderReplaceExisting) {
+      // Remove any existing bracket matches for this phase
+      updatedMatches = [
+        ...matches.filter(m => !(m.tournamentId === currentTour.id && m.isLlave && m.round === phase)),
+        ...newMatches
       ];
     } else {
-      return [
-        { id: '5g_octavos', name: 'Octavos Estándar (16 equipos: 1ros, 2dos, 3ros + Mejor 4to)', phaseName: 'Octavos de Final' }
-      ];
+      updatedMatches = [...matches, ...newMatches];
     }
+
+    const notifText = `🏆 Nuevas llaves generadas para "${currentTour.name}": ${phase} (${newMatches.length} partidos)`;
+
+    realtimeSync.publishAction({
+      type: 'MATCHES_UPDATE',
+      tournamentId: currentTour.id,
+      matches: updatedMatches.filter(m => m.tournamentId === currentTour.id),
+      notifText,
+      timestamp: Date.now()
+    });
+
+    saveState(teams, tournaments, updatedMatches, notifText, currentTour.id);
+    setShowBracketBuilderModal(false);
+  };
+
+  const handleSyncBracketStandings = (tour: Tournament) => {
+    if (!checkCanEdit(tour.id)) return;
+    let updatedCount = 0;
+    const updatedMatches = matches.map(m => {
+      if (m.tournamentId === tour.id && m.isLlave && !m.played && (m.sourceA || m.sourceB)) {
+        let newTeamAId = m.teamAId;
+        let newTeamBId = m.teamBId;
+        if (m.sourceA) {
+          const resA = resolveBracketSource(tour.id, m.sourceA);
+          if (resA.teamId && resA.teamId !== m.teamAId) {
+            newTeamAId = resA.teamId;
+            updatedCount++;
+          }
+        }
+        if (m.sourceB) {
+          const resB = resolveBracketSource(tour.id, m.sourceB);
+          if (resB.teamId && resB.teamId !== m.teamBId) {
+            newTeamBId = resB.teamId;
+            updatedCount++;
+          }
+        }
+        return { ...m, teamAId: newTeamAId, teamBId: newTeamBId };
+      }
+      return m;
+    });
+
+    if (updatedCount > 0) {
+      const notifText = `🔄 Equipos en llaves actualizados según las posiciones de los grupos (${updatedCount} cruces actualizados)`;
+      realtimeSync.publishAction({
+        type: 'MATCHES_UPDATE',
+        tournamentId: tour.id,
+        matches: updatedMatches.filter(m => m.tournamentId === tour.id),
+        notifText,
+        timestamp: Date.now()
+      });
+      saveState(teams, tournaments, updatedMatches, notifText, tour.id);
+      setActiveCloudNotif({ id: Date.now(), text: notifText, timestamp: Date.now() });
+    } else {
+      setActiveCloudNotif({ id: Date.now(), text: '✅ Las llaves ya se encuentran al día con las tablas de posiciones.', timestamp: Date.now() });
+    }
+  };
+
+  // --- AUTO LLAVES GENERATION SYSTEM FOR GROUPS (LEGACY PRESETS COMPATIBILITY) ---
+  const getPairingTemplates = (numGroups: number) => {
+    if (!currentTour) return [];
+    return getBracketTemplates(currentTour);
   };
 
   const generateMatchupsFromTemplate = (tourId: string, templateId: string): { teamAId: string; teamBId: string; label: string }[] => {
     const tour = tournaments.find(t => t.id === tourId);
     if (!tour) return [];
-    
-    const numGroups = tour.numGroups || 2;
-    const groupsList = Array.from({ length: numGroups }, (_, i) => String.fromCharCode(65 + i));
-    
-    const standingsByGroup: Record<string, StandingRow[]> = {};
-    groupsList.forEach(g => {
-      standingsByGroup[g] = calculateStandings(tourId, g);
+    const templates = getBracketTemplates(tour);
+    const selected = templates.find(t => t.id === templateId);
+    if (!selected) return [];
+
+    return selected.rules.map(r => {
+      const resA = resolveBracketSource(tourId, r.sourceA);
+      const resB = resolveBracketSource(tourId, r.sourceB);
+      return {
+        teamAId: resA.teamId,
+        teamBId: resB.teamId,
+        label: r.customLabel || `${resA.label} VS ${resB.label}`
+      };
     });
-
-    const getTeamId = (group: string, rank0: number): string => {
-      return standingsByGroup[group]?.[rank0]?.teamId || '';
-    };
-
-    const getBestThirdPlaces = (count: number): string[] => {
-      const thirds = groupsList.map(g => {
-        const std = standingsByGroup[g];
-        return std && std.length >= 3 ? { group: g, teamId: std[2].teamId, row: std[2] } : null;
-      }).filter((x): x is { group: string; teamId: string; row: StandingRow } => x !== null);
-      
-      thirds.sort((a, b) => {
-        if (b.row.points !== a.row.points) return b.row.points - a.row.points;
-        if (b.row.goalDifference !== a.row.goalDifference) return b.row.goalDifference - a.row.goalDifference;
-        return b.row.goalsFor - a.row.goalsFor;
-      });
-      return thirds.slice(0, count).map(x => x.teamId);
-    };
-
-    const getBestFourthPlaces = (count: number): string[] => {
-      const fourths = groupsList.map(g => {
-        const std = standingsByGroup[g];
-        return std && std.length >= 4 ? { group: g, teamId: std[3].teamId, row: std[3] } : null;
-      }).filter((x): x is { group: string; teamId: string; row: StandingRow } => x !== null);
-      
-      fourths.sort((a, b) => {
-        if (b.row.points !== a.row.points) return b.row.points - a.row.points;
-        if (b.row.goalDifference !== a.row.goalDifference) return b.row.goalDifference - a.row.goalDifference;
-        return b.row.goalsFor - a.row.goalsFor;
-      });
-      return fourths.slice(0, count).map(x => x.teamId);
-    };
-
-    if (templateId === '2g_semi') {
-      return [
-        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 1), label: '1ro Grupo A VS 2do Grupo B' },
-        { teamAId: getTeamId('B', 0), teamBId: getTeamId('A', 1), label: '1ro Grupo B VS 2do Grupo A' }
-      ];
-    }
-    
-    if (templateId === '2g_cuartos') {
-      return [
-        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 3), label: '1ro Grupo A VS 4to Grupo B' },
-        { teamAId: getTeamId('B', 0), teamBId: getTeamId('A', 3), label: '1ro Grupo B VS 4to Grupo A' },
-        { teamAId: getTeamId('A', 1), teamBId: getTeamId('B', 2), label: '2do Grupo A VS 3ro Grupo B' },
-        { teamAId: getTeamId('B', 1), teamBId: getTeamId('A', 2), label: '2do Grupo B VS 3ro Grupo A' }
-      ];
-    }
-
-    if (templateId === '2g_cuartos_3ro') {
-      const best3rds = getBestThirdPlaces(2);
-      return [
-        { teamAId: getTeamId('A', 0), teamBId: best3rds[1] || '', label: '1ro Grupo A VS 2do Mejor 3ro' },
-        { teamAId: getTeamId('B', 0), teamBId: best3rds[0] || '', label: '1ro Grupo B VS 1er Mejor 3ro' },
-        { teamAId: getTeamId('A', 1), teamBId: getTeamId('B', 2), label: '2do Grupo A VS 3ro Grupo B' },
-        { teamAId: getTeamId('B', 1), teamBId: getTeamId('A', 2), label: '2do Grupo B VS 3ro Grupo A' }
-      ];
-    }
-
-    if (templateId === '3g_semi') {
-      const best3rds = getBestThirdPlaces(1);
-      return [
-        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 0), label: '1ro Grupo A VS 1ro Grupo B' },
-        { teamAId: getTeamId('C', 0), teamBId: best3rds[0] || '', label: '1ro Grupo C VS Mejor 3ro' }
-      ];
-    }
-
-    if (templateId === '3g_cuartos') {
-      const best3rds = getBestThirdPlaces(2);
-      return [
-        { teamAId: getTeamId('A', 0), teamBId: best3rds[1] || '', label: '1ro Grupo A VS 2do Mejor 3ro' },
-        { teamAId: getTeamId('B', 0), teamBId: best3rds[0] || '', label: '1ro Grupo B VS 1er Mejor 3ro' },
-        { teamAId: getTeamId('C', 0), teamBId: getTeamId('B', 1), label: '1ro Grupo C VS 2do Grupo B' },
-        { teamAId: getTeamId('A', 1), teamBId: getTeamId('C', 1), label: '2do Grupo A VS 2do Grupo C' }
-      ];
-    }
-
-    if (templateId === '4g_cuartos') {
-      return [
-        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 1), label: '1ro Grupo A VS 2do Grupo B' },
-        { teamAId: getTeamId('B', 0), teamBId: getTeamId('A', 1), label: '1ro Grupo B VS 2do Grupo A' },
-        { teamAId: getTeamId('C', 0), teamBId: getTeamId('D', 1), label: '1ro Grupo C VS 2do Grupo D' },
-        { teamAId: getTeamId('D', 0), teamBId: getTeamId('C', 1), label: '1ro Grupo D VS 2do Grupo C' }
-      ];
-    }
-
-    if (templateId === '4g_cuartos_3ro') {
-      const best3rds = getBestThirdPlaces(4);
-      return [
-        { teamAId: getTeamId('A', 0), teamBId: best3rds[3] || '', label: '1ro Grupo A VS 4to Mejor 3ro' },
-        { teamAId: getTeamId('B', 0), teamBId: best3rds[2] || '', label: '1ro Grupo B VS 3er Mejor 3ro' },
-        { teamAId: getTeamId('C', 0), teamBId: best3rds[1] || '', label: '1ro Grupo C VS 2do Mejor 3ro' },
-        { teamAId: getTeamId('D', 0), teamBId: best3rds[0] || '', label: '1ro Grupo D VS 1er Mejor 3ro' }
-      ];
-    }
-
-    if (templateId === '4g_octavos') {
-      return [
-        { teamAId: getTeamId('A', 0), teamBId: getTeamId('B', 3), label: '1ro Grupo A VS 4to Grupo B' },
-        { teamAId: getTeamId('B', 0), teamBId: getTeamId('A', 3), label: '1ro Grupo B VS 4to Grupo A' },
-        { teamAId: getTeamId('C', 0), teamBId: getTeamId('D', 3), label: '1ro Grupo C VS 4to Grupo D' },
-        { teamAId: getTeamId('D', 0), teamBId: getTeamId('C', 3), label: '1ro Grupo D VS 4to Grupo C' },
-        { teamAId: getTeamId('A', 1), teamBId: getTeamId('B', 2), label: '2do Grupo A VS 3ro Grupo B' },
-        { teamAId: getTeamId('B', 1), teamBId: getTeamId('A', 2), label: '2do Grupo B VS 3ro Grupo A' },
-        { teamAId: getTeamId('C', 1), teamBId: getTeamId('D', 2), label: '2do Grupo C VS 3ro Grupo D' },
-        { teamAId: getTeamId('D', 1), teamBId: getTeamId('C', 2), label: '2do Grupo D VS 3ro Grupo C' }
-      ];
-    }
-
-    if (templateId === '5g_octavos') {
-      const best4ths = getBestFourthPlaces(1);
-      return [
-        { teamAId: getTeamId('A', 0), teamBId: best4ths[0] || '', label: '1ro Grupo A VS Mejor 4to' },
-        { teamAId: getTeamId('C', 1), teamBId: getTeamId('A', 2), label: '2do Grupo C VS 3ro Grupo A' },
-        { teamAId: getTeamId('C', 0), teamBId: getTeamId('D', 2), label: '1ro Grupo C VS 3ro Grupo D' },
-        { teamAId: getTeamId('D', 0), teamBId: getTeamId('C', 2), label: '1ro Grupo D VS 3ro Grupo C' },
-        { teamAId: getTeamId('E', 0), teamBId: getTeamId('B', 2), label: '1ro Grupo E VS 3ro Grupo B' },
-        { teamAId: getTeamId('A', 1), teamBId: getTeamId('D', 1), label: '2do Grupo A VS 2do Grupo D' },
-        { teamAId: getTeamId('B', 1), teamBId: getTeamId('E', 1), label: '2do Grupo B VS 2do Grupo E' },
-        { teamAId: getTeamId('B', 0), teamBId: getTeamId('E', 2), label: '1ro Grupo B VS 3ro Grupo E' }
-      ];
-    }
-
-    return [];
   };
 
   const handleAutoCreateLlaves = () => {
@@ -2082,7 +2654,8 @@ export default function App() {
       scoreB: null,
       played: false,
       round: autoPhaseName.trim() || 'Fase Eliminatoria',
-      isLlave: true
+      isLlave: true,
+      label: p.label
     }));
 
     // Add them to the existing matches
@@ -2468,16 +3041,6 @@ export default function App() {
 
   // --- RENDER HEADING LOGO BADGE ---
   const renderTeamBadge = (team: Team, sizeClass = 'w-10 h-10') => {
-    if (team.logoUrl) {
-      return (
-        <img 
-          src={team.logoUrl} 
-          alt={team.name} 
-          className={`${sizeClass} rounded-full object-contain border border-slate-700 bg-slate-900 p-0.5 flex-shrink-0`}
-        />
-      );
-    }
-
     // Dynamic Symbol presets
     let symbolIcon = <Shield className="w-1/2 h-1/2 text-white" />;
     if (team.badgeSymbol === 'ball') symbolIcon = <span className="text-sm font-bold">⚽</span>;
@@ -2487,11 +3050,25 @@ export default function App() {
     else if (team.badgeSymbol === 'flame') symbolIcon = <span className="text-sm">🔥</span>;
     else if (team.badgeSymbol === 'zap') symbolIcon = <Zap className="w-1/2 h-1/2 text-white fill-white" />;
 
+    if (team.logoUrl) {
+      return (
+        <img 
+          src={team.logoUrl} 
+          alt={team.name} 
+          onError={(e) => {
+            // If image fails to load, gracefully fallback to custom symbol badge
+            e.currentTarget.style.display = 'none';
+          }}
+          className={`${sizeClass} rounded-full object-contain border border-slate-700 bg-slate-900 p-0.5 flex-shrink-0`}
+        />
+      );
+    }
+
     return (
       <div 
         className={`${sizeClass} rounded-full flex items-center justify-center border-2 shadow-inner relative flex-shrink-0`}
         style={{ 
-          backgroundColor: team.primaryColor, 
+          backgroundColor: team.primaryColor || '#10b981', 
           borderColor: team.secondaryColor || '#334155' 
         }}
       >
@@ -2903,191 +3480,227 @@ export default function App() {
             {/* SUB-VIEW: LLAVES */}
             {tournamentSubTab === 'keys' && (
               <div className="space-y-6">
-                {currentTour.name === 'INTERLIGA CANTONAL PORTOVIEJO 2026' ? (
-                  <>
-                    <div className="bg-gradient-to-r from-emerald-950/40 via-slate-900/40 to-emerald-950/40 border border-emerald-900/30 p-5 rounded-3xl text-center">
-                      <div className="flex items-center justify-center gap-2 mb-1.5">
-                        <Trophy className="w-5 h-5 text-emerald-400" />
-                        <h3 className="text-base font-extrabold text-white uppercase tracking-wider">
-                          Emparejamientos de Llaves (Octavos de Final)
+                {/* Header Banner & Organizer Controls */}
+                <div className="bg-gradient-to-r from-emerald-950/50 via-slate-900/60 to-emerald-950/50 border border-emerald-900/40 p-6 rounded-3xl relative overflow-hidden shadow-xl">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <div className="w-8 h-8 rounded-xl bg-emerald-950 border border-emerald-800/60 flex items-center justify-center text-emerald-400">
+                          <Trophy className="w-4 h-4" />
+                        </div>
+                        <h3 className="text-lg font-black text-white uppercase tracking-wider">
+                          Emparejamientos de Llaves y Fases Finales
                         </h3>
                       </div>
-                      <p className="text-xs text-slate-400 max-w-xl mx-auto leading-relaxed">
-                        Las llaves se definen dinámicamente según el orden final de los grupos (A, B, C, D, E) y el mejor 4to lugar de todos los grupos. {canEditCurrentTour && 'Como administrador, puedes editar marcadores y sobrescribir cruces manualmente.'}
+                      <p className="text-xs text-slate-400 max-w-2xl leading-relaxed">
+                        Arma y personaliza las llaves según las tablas de posiciones (ej. 1ro Grupo A vs 4to Grupo C, 2do A vs 3ro C, etc.) o con cruces directos. Los equipos se resuelven en tiempo real.
                       </p>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {Array.from({ length: 8 }, (_, i) => {
-                        const match = getLlaveMatch(currentTour.id, i);
-                        const defaultTeams = getLlavesDefaultTeams(currentTour.id)[i];
-                        const teamA = teams.find(t => t.id === match.teamAId);
-                        const teamB = teams.find(t => t.id === match.teamBId);
+                    {canEditCurrentTour && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenBracketBuilder(currentTour)}
+                          className="px-4 py-2.5 bg-gradient-to-r from-emerald-600 to-green-500 hover:from-emerald-500 hover:to-green-400 text-white text-xs font-black rounded-xl flex items-center gap-2 shadow-lg shadow-emerald-950/60 transition cursor-pointer"
+                        >
+                          <Wand2 className="w-4 h-4" />
+                          <span>Armar y Configurar Cruces</span>
+                        </button>
 
-                        return (
-                          <div 
-                            key={match.id}
-                            onClick={() => {
-                              if (canEditCurrentTour) {
-                                handleOpenScoreModal(match);
-                              }
-                            }}
-                            className={`p-4 bg-slate-900 rounded-2xl border ${
-                              match.played ? 'border-emerald-500/30 bg-emerald-950/5' : 'border-slate-800'
-                            } hover:border-emerald-500/50 transition relative overflow-hidden flex flex-col justify-between ${
-                              canEditCurrentTour ? 'cursor-pointer' : ''
-                            }`}
-                          >
-                            <div className="flex items-center justify-between border-b border-slate-800/80 pb-2 mb-3">
-                              <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest bg-emerald-950/60 border border-emerald-900/30 px-2 py-0.5 rounded-md">
-                                Llave {i + 1}
-                              </span>
-                              <span className="text-[10px] font-medium text-slate-400 flex items-center gap-1">
-                                {defaultTeams.desc}
-                                {match.overrideTeams && (
-                                  <span className="text-[9px] font-bold text-amber-400 bg-amber-950/40 border border-amber-900/30 px-1 py-0.2 rounded">
-                                    Manual
-                                  </span>
-                                )}
-                              </span>
-                            </div>
+                        <button
+                          type="button"
+                          onClick={() => handleSyncBracketStandings(currentTour)}
+                          className="px-3 py-2 bg-slate-800 hover:bg-slate-750 text-slate-200 text-xs font-bold rounded-xl border border-slate-700 flex items-center gap-1.5 transition cursor-pointer"
+                          title="Actualizar equipos en llaves según la tabla de posiciones actual"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="hidden sm:inline">Sincronizar con Tabla</span>
+                        </button>
 
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                                {teamA ? renderTeamBadge(teamA, 'w-8 h-8') : (
-                                  <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
-                                    <span className="text-[9px] font-bold text-slate-500">TBD</span>
-                                  </div>
-                                )}
-                                <div className="min-w-0">
-                                  <span className={`text-xs font-extrabold truncate block ${
-                                    match.played && (match.scoreA ?? 0) > (match.scoreB ?? 0) ? 'text-white' : 'text-slate-300'
-                                  }`}>
-                                    {teamA ? teamA.name : 'Por clasificar'}
-                                  </span>
-                                  <span className="text-[9px] text-slate-500 block">Local</span>
-                                </div>
-                              </div>
-
-                              <div className="flex flex-col items-center gap-1 mx-3 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850">
-                                {match.played ? (
-                                  <div className="flex flex-col items-center gap-0.5">
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-base font-black text-white">{match.scoreA}</span>
-                                      <span className="text-slate-600 font-bold text-xs">-</span>
-                                      <span className="text-base font-black text-white">{match.scoreB}</span>
-                                    </div>
-                                    {match.scoreA === match.scoreB && match.penaltiesA !== null && match.penaltiesB !== null && (
-                                      <span className="text-[9px] text-amber-400 font-medium tracking-tight">
-                                        ({match.penaltiesA} - {match.penaltiesB} Pen)
-                                      </span>
-                                    )}
-                                  </div>
-                                ) : (
-                                  <span className="text-[9px] font-black text-slate-500 uppercase tracking-wider">VS</span>
-                                )}
-                              </div>
-
-                              <div className="flex items-center gap-2.5 flex-1 justify-end min-w-0 text-right">
-                                <div className="min-w-0">
-                                  <span className={`text-xs font-extrabold truncate block ${
-                                    match.played && (match.scoreB ?? 0) > (match.scoreA ?? 0) ? 'text-white' : 'text-slate-300'
-                                  }`}>
-                                    {teamB ? teamB.name : 'Por clasificar'}
-                                  </span>
-                                  <span className="text-[9px] text-slate-500 block">Visitante</span>
-                                </div>
-                                {teamB ? renderTeamBadge(teamB, 'w-8 h-8') : (
-                                  <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
-                                    <span className="text-[9px] font-bold text-slate-500">TBD</span>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-
-                            {canEditCurrentTour && (
-                              <div className="flex items-center justify-end gap-1.5 mt-3 pt-2 border-t border-slate-800/50">
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleOpenEditMatchDetails(match);
-                                  }}
-                                  className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 px-2.5 py-1 bg-emerald-950/40 border border-emerald-900/30 rounded-lg transition flex items-center gap-1"
-                                >
-                                  <Edit2 className="w-3 h-3" /> Editar Cruce / Marcador
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                ) : (
-                  // Manual LLAVES configuration for other tournaments
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h3 className="text-lg font-bold text-white">Fases de Eliminación Directa</h3>
-                        <p className="text-xs text-slate-400">Crea y gestiona las fases finales de forma personalizada.</p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setManualLlaveState({
+                              phaseName: 'Segunda Fase',
+                              teamAId: '',
+                              teamBId: '',
+                              scoreA: '',
+                              scoreB: '',
+                              played: false
+                            });
+                            setShowAddManualLlaveModal(true);
+                          }}
+                          className="px-3 py-2 bg-slate-850 hover:bg-slate-800 text-slate-300 text-xs font-bold rounded-xl border border-slate-750 flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Llave Individual</span>
+                        </button>
                       </div>
-                      {canEditCurrentTour && (
-                        <div className="flex items-center gap-2">
-                          {currentTour.type === 'GRUPOS' && (
+                    )}
+                  </div>
+                </div>
+
+                {/* Match Lists for Llaves */}
+                {(() => {
+                  const tourLlaveMatches = matches.filter(
+                    m => m.tournamentId === currentTour.id && (m.isLlave === true || m.round === 'LLAVES')
+                  );
+
+                  if (tourLlaveMatches.length === 0 && currentTour.name === 'INTERLIGA CANTONAL PORTOVIEJO 2026') {
+                    // Default Fallback for Interliga Cantonal
+                    return (
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                          <h4 className="text-sm font-black text-emerald-400 uppercase tracking-wider flex items-center gap-2">
+                            🏆 Octavos de Final (Clasificación por Grupos)
+                          </h4>
+                          {canEditCurrentTour && (
                             <button
-                              onClick={() => {
-                                const templates = getPairingTemplates(currentTour.numGroups || 2);
-                                const firstTemplate = templates[0];
-                                setSelectedTemplateId(firstTemplate.id);
-                                setAutoPhaseName(firstTemplate.phaseName);
-                                setShowAutoLlaveModal(true);
-                              }}
-                              className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1 transition shadow cursor-pointer"
+                              type="button"
+                              onClick={() => handleOpenBracketBuilder(currentTour)}
+                              className="text-xs font-bold text-emerald-400 hover:text-emerald-300 transition"
                             >
-                              <Trophy className="w-3.5 h-3.5" /> CREAR LLAVES
+                              Configurar Cruces →
                             </button>
                           )}
-                          <button
-                            onClick={() => {
-                              setManualLlaveState({
-                                phaseName: 'Segunda Fase',
-                                teamAId: '',
-                                teamBId: '',
-                                scoreA: '',
-                                scoreB: '',
-                                played: false
-                              });
-                              setShowAddManualLlaveModal(true);
-                            }}
-                            className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1 transition shadow cursor-pointer"
-                          >
-                            <Plus className="w-3.5 h-3.5" /> Agregar Llave / Partido
-                          </button>
                         </div>
-                      )}
-                    </div>
 
-                    {matches.filter(m => m.tournamentId === currentTour.id && m.isLlave === true).length === 0 ? (
-                      <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl text-center">
-                        <p className="text-slate-400 text-sm">Aún no se han configurado llaves manuales para este torneo.</p>
-                        {canEditCurrentTour && (
-                          <div className="flex justify-center gap-2 mt-4 flex-wrap">
-                            {currentTour.type === 'GRUPOS' && (
-                              <button
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {Array.from({ length: 8 }, (_, i) => {
+                            const match = getLlaveMatch(currentTour.id, i);
+                            const defaultTeams = getLlavesDefaultTeams(currentTour.id)[i];
+                            const teamA = teams.find(t => t.id === match.teamAId);
+                            const teamB = teams.find(t => t.id === match.teamBId);
+
+                            return (
+                              <div
+                                key={match.id}
                                 onClick={() => {
-                                  const templates = getPairingTemplates(currentTour.numGroups || 2);
-                                  const firstTemplate = templates[0];
-                                  setSelectedTemplateId(firstTemplate.id);
-                                  setAutoPhaseName(firstTemplate.phaseName);
-                                  setShowAutoLlaveModal(true);
+                                  if (canEditCurrentTour) {
+                                    handleOpenScoreModal(match);
+                                  }
                                 }}
-                                className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-4 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow"
+                                className={`p-4 bg-slate-900 rounded-2xl border ${
+                                  match.played ? 'border-emerald-500/30 bg-emerald-950/5' : 'border-slate-800'
+                                } hover:border-emerald-500/50 transition relative overflow-hidden flex flex-col justify-between ${
+                                  canEditCurrentTour ? 'cursor-pointer' : ''
+                                }`}
                               >
-                                <Trophy className="w-3.5 h-3.5" /> Crear Llaves Automáticamente
-                              </button>
-                            )}
+                                <div className="flex items-center justify-between border-b border-slate-800/80 pb-2 mb-3">
+                                  <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest bg-emerald-950/60 border border-emerald-900/30 px-2 py-0.5 rounded-md">
+                                    Llave {i + 1}
+                                  </span>
+                                  <span className="text-[10px] font-medium text-slate-400 flex items-center gap-1">
+                                    {defaultTeams.desc}
+                                    {match.overrideTeams && (
+                                      <span className="text-[9px] font-bold text-amber-400 bg-amber-950/40 border border-amber-900/30 px-1 py-0.2 rounded">
+                                        Manual
+                                      </span>
+                                    )}
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                                    {teamA ? renderTeamBadge(teamA, 'w-8 h-8') : (
+                                      <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                                        <span className="text-[9px] font-bold text-slate-500">TBD</span>
+                                      </div>
+                                    )}
+                                    <div className="min-w-0">
+                                      <span className={`text-xs font-extrabold truncate block ${
+                                        match.played && (match.scoreA ?? 0) > (match.scoreB ?? 0) ? 'text-white' : 'text-slate-300'
+                                      }`}>
+                                        {teamA ? teamA.name : 'Por clasificar'}
+                                      </span>
+                                      <span className="text-[9px] text-slate-500 block">Local</span>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex flex-col items-center gap-1 mx-3 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850">
+                                    {match.played ? (
+                                      <div className="flex flex-col items-center gap-0.5">
+                                        <div className="flex items-center gap-2">
+                                          <span className="text-base font-black text-white">{match.scoreA}</span>
+                                          <span className="text-slate-600 font-bold text-xs">-</span>
+                                          <span className="text-base font-black text-white">{match.scoreB}</span>
+                                        </div>
+                                        {match.scoreA === match.scoreB && match.penaltiesA !== null && match.penaltiesB !== null && (
+                                          <span className="text-[9px] text-amber-400 font-medium tracking-tight">
+                                            ({match.penaltiesA} - {match.penaltiesB} Pen)
+                                          </span>
+                                        )}
+                                      </div>
+                                    ) : (
+                                      <span className="text-[9px] font-black text-slate-500 uppercase tracking-wider">VS</span>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-2.5 flex-1 justify-end min-w-0 text-right">
+                                    <div className="min-w-0">
+                                      <span className={`text-xs font-extrabold truncate block ${
+                                        match.played && (match.scoreB ?? 0) > (match.scoreA ?? 0) ? 'text-white' : 'text-slate-300'
+                                      }`}>
+                                        {teamB ? teamB.name : 'Por clasificar'}
+                                      </span>
+                                      <span className="text-[9px] text-slate-500 block">Visitante</span>
+                                    </div>
+                                    {teamB ? renderTeamBadge(teamB, 'w-8 h-8') : (
+                                      <div className="w-8 h-8 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                                        <span className="text-[9px] font-bold text-slate-500">TBD</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {canEditCurrentTour && (
+                                  <div className="flex items-center justify-end gap-1.5 mt-3 pt-2 border-t border-slate-800/50">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleOpenEditMatchDetails(match);
+                                      }}
+                                      className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 px-2.5 py-1 bg-emerald-950/40 border border-emerald-900/30 rounded-lg transition flex items-center gap-1"
+                                    >
+                                      <Edit2 className="w-3 h-3" /> Editar Cruce / Marcador
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (tourLlaveMatches.length === 0) {
+                    return (
+                      <div className="bg-slate-900 border border-slate-800 p-10 rounded-3xl text-center space-y-4">
+                        <div className="w-16 h-16 rounded-3xl bg-slate-950 border border-slate-800 flex items-center justify-center mx-auto text-emerald-400 shadow-inner">
+                          <Trophy className="w-8 h-8" />
+                        </div>
+                        <div>
+                          <h4 className="text-base font-extrabold text-white">Aún no se han configurado llaves para este torneo</h4>
+                          <p className="text-xs text-slate-400 max-w-md mx-auto mt-1">
+                            Puedes crear las llaves automáticamente usando las posiciones de los grupos o configurar tus propios cruces personalizados.
+                          </p>
+                        </div>
+
+                        {canEditCurrentTour && (
+                          <div className="flex flex-wrap justify-center gap-3 pt-2">
                             <button
+                              type="button"
+                              onClick={() => handleOpenBracketBuilder(currentTour)}
+                              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black rounded-xl transition cursor-pointer flex items-center gap-2 shadow-lg shadow-emerald-950"
+                            >
+                              <Wand2 className="w-4 h-4" />
+                              <span>Armar Cruces de Llaves</span>
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => {
                                 setManualLlaveState({
                                   phaseName: 'Segunda Fase',
@@ -3099,142 +3712,197 @@ export default function App() {
                                 });
                                 setShowAddManualLlaveModal(true);
                               }}
-                              className="bg-emerald-600 text-white text-xs font-bold px-4 py-2 rounded-xl transition cursor-pointer"
+                              className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl border border-slate-700 transition cursor-pointer"
                             >
-                              Crear Primera Llave
+                              Crear Llave Individual
                             </button>
                           </div>
                         )}
                       </div>
-                    ) : (
-                      <div className="space-y-8">
-                        {(Object.entries(
-                          matches
-                            .filter(m => m.tournamentId === currentTour.id && m.isLlave === true)
-                            .reduce((acc, m) => {
-                              if (!acc[m.round]) acc[m.round] = [];
-                              acc[m.round].push(m);
-                              return acc;
-                            }, {} as Record<string, Match[]>)
-                        ) as [string, Match[]][]).map(([phase, phaseMatches]) => (
-                          <div key={phase} className="space-y-4">
-                            <h4 className="text-sm font-extrabold text-emerald-400 uppercase tracking-wider border-b border-slate-800/80 pb-1.5 flex items-center gap-2">
-                              🏆 {phase}
+                    );
+                  }
+
+                  // Group matches by Phase / Round
+                  const groupedPhases = tourLlaveMatches.reduce((acc, m) => {
+                    const phase = m.round || 'Fase Eliminatoria';
+                    if (!acc[phase]) acc[phase] = [];
+                    acc[phase].push(m);
+                    return acc;
+                  }, {} as Record<string, Match[]>);
+
+                  return (
+                    <div className="space-y-8">
+                      {(Object.entries(groupedPhases) as [string, Match[]][]).map(([phase, phaseMatches]) => (
+                        <div key={phase} className="space-y-4">
+                          <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                            <h4 className="text-sm font-black text-emerald-400 uppercase tracking-wider flex items-center gap-2">
+                              <span>🏆</span> {phase} ({phaseMatches.length} {phaseMatches.length === 1 ? 'partido' : 'partidos'})
                             </h4>
+                          </div>
 
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              {phaseMatches.map(match => {
-                                const teamA = teams.find(t => t.id === match.teamAId);
-                                const teamB = teams.find(t => t.id === match.teamBId);
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {phaseMatches.map((match, matchIdx) => {
+                              // Dynamic resolution if match has source definitions and not yet locked
+                              let teamA = teams.find(t => t.id === match.teamAId);
+                              let teamB = teams.find(t => t.id === match.teamBId);
 
-                                return (
-                                  <div
-                                    key={match.id}
-                                    onClick={() => {
-                                      if (canEditCurrentTour) {
-                                        handleOpenEditMatchDetails(match);
-                                      }
-                                    }}
-                                    className={`p-4 bg-slate-900 border rounded-2xl transition ${
-                                      match.played ? 'border-emerald-500/30 bg-emerald-950/5' : 'border-slate-800'
-                                    } ${canEditCurrentTour ? 'hover:border-emerald-500/50 cursor-pointer' : ''}`}
-                                  >
+                              const sourceInfoA = match.sourceA ? resolveBracketSource(currentTour.id, match.sourceA) : null;
+                              const sourceInfoB = match.sourceB ? resolveBracketSource(currentTour.id, match.sourceB) : null;
+
+                              if (!teamA && sourceInfoA?.team) teamA = sourceInfoA.team;
+                              if (!teamB && sourceInfoB?.team) teamB = sourceInfoB.team;
+
+                              return (
+                                <div
+                                  key={match.id}
+                                  onClick={() => {
+                                    if (canEditCurrentTour) {
+                                      handleOpenEditMatchDetails(match);
+                                    }
+                                  }}
+                                  className={`p-4 bg-slate-900 border rounded-2xl transition relative overflow-hidden flex flex-col justify-between ${
+                                    match.played ? 'border-emerald-500/30 bg-emerald-950/5' : 'border-slate-800'
+                                  } ${canEditCurrentTour ? 'hover:border-emerald-500/50 cursor-pointer' : ''}`}
+                                >
+                                  {/* Match Header Bar */}
+                                  <div className="flex flex-wrap items-center justify-between gap-1.5 border-b border-slate-800/80 pb-2 mb-3">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest bg-emerald-950/60 border border-emerald-900/30 px-2 py-0.5 rounded-md">
+                                        Llave {matchIdx + 1}
+                                      </span>
+                                      {match.label && (
+                                        <span className="text-[10px] font-semibold text-slate-300 truncate max-w-[200px]" title={match.label}>
+                                          {match.label}
+                                        </span>
+                                      )}
+                                    </div>
+
                                     {(match.time || match.venue) && (
-                                      <div className="flex items-center gap-2 mb-2.5 pb-2 border-b border-slate-800/80 text-[10px] font-extrabold">
+                                      <div className="flex items-center gap-1.5 text-[9px] font-bold">
                                         {match.time && (
-                                          <span className="flex items-center gap-1 text-sky-400 bg-sky-950/60 border border-sky-900/40 px-2 py-0.5 rounded-md">
-                                            <Clock className="w-3 h-3" /> {match.time}
+                                          <span className="flex items-center gap-1 text-sky-400 bg-sky-950/60 border border-sky-900/40 px-1.5 py-0.5 rounded">
+                                            <Clock className="w-2.5 h-2.5" /> {match.time}
                                           </span>
                                         )}
                                         {match.venue && (
-                                          <span className="flex items-center gap-1 text-amber-400 truncate bg-amber-950/60 border border-amber-900/40 px-2 py-0.5 rounded-md" title={match.venue}>
-                                            <MapPin className="w-3 h-3 flex-shrink-0" /> {match.venue}
+                                          <span className="flex items-center gap-1 text-amber-400 bg-amber-950/60 border border-amber-900/40 px-1.5 py-0.5 rounded truncate max-w-[120px]" title={match.venue}>
+                                            <MapPin className="w-2.5 h-2.5 flex-shrink-0" /> {match.venue}
                                           </span>
                                         )}
                                       </div>
                                     )}
+                                  </div>
 
-                                    <div className="flex items-center justify-between">
-                                      {/* Team A */}
-                                      <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                                        {teamA ? renderTeamBadge(teamA, 'w-8 h-8 md:w-9 md:h-9') : (
-                                          <div className="w-8 h-8 md:w-9 md:h-9 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center flex-shrink-0">
-                                            <span className="text-[10px] font-bold text-slate-500">TBD</span>
-                                          </div>
-                                        )}
-                                        <div className="min-w-0">
-                                          <span className="text-xs md:text-sm font-black text-slate-100 block truncate">
-                                            {teamA ? teamA.name : 'TBD'}
-                                          </span>
+                                  {/* Teams & Score Row */}
+                                  <div className="flex items-center justify-between">
+                                    {/* Team A */}
+                                    <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                                      {teamA ? renderTeamBadge(teamA, 'w-8 h-8 md:w-9 md:h-9') : (
+                                        <div className="w-8 h-8 md:w-9 md:h-9 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center flex-shrink-0">
+                                          <span className="text-[9px] font-bold text-slate-500">TBD</span>
                                         </div>
-                                      </div>
-
-                                      {/* Score */}
-                                      <div className="flex flex-col items-center gap-0.5 mx-3 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850 flex-shrink-0">
-                                        <div className="flex items-center gap-2">
-                                          <span className="text-sm font-black text-white">{match.played ? match.scoreA : '-'}</span>
-                                          <span className="text-slate-600 font-bold text-xs">:</span>
-                                          <span className="text-sm font-black text-white">{match.played ? match.scoreB : '-'}</span>
-                                        </div>
-                                        {match.played && match.scoreA === match.scoreB && match.penaltiesA !== null && match.penaltiesB !== null && (
-                                          <span className="text-[9px] text-amber-400 font-medium tracking-tight">
-                                            ({match.penaltiesA} - {match.penaltiesB} Pen)
+                                      )}
+                                      <div className="min-w-0">
+                                        <span className={`text-xs md:text-sm font-black truncate block ${
+                                          match.played && (match.scoreA ?? 0) > (match.scoreB ?? 0) ? 'text-white' : 'text-slate-300'
+                                        }`}>
+                                          {teamA ? teamA.name : (sourceInfoA ? sourceInfoA.label : 'Por clasificar')}
+                                        </span>
+                                        {sourceInfoA && (
+                                          <span className="text-[9px] text-slate-500 block truncate">
+                                            {sourceInfoA.label} {sourceInfoA.stats ? `(${sourceInfoA.stats})` : ''}
                                           </span>
-                                        )}
-                                      </div>
-
-                                      {/* Team B */}
-                                      <div className="flex items-center gap-2.5 flex-1 justify-end min-w-0 text-right">
-                                        <div className="min-w-0">
-                                          <span className="text-xs md:text-sm font-black text-slate-100 block truncate">
-                                            {teamB ? teamB.name : 'TBD'}
-                                          </span>
-                                        </div>
-                                        {teamB ? renderTeamBadge(teamB, 'w-8 h-8 md:w-9 md:h-9') : (
-                                          <div className="w-8 h-8 md:w-9 md:h-9 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center flex-shrink-0">
-                                            <span className="text-[10px] font-bold text-slate-500">TBD</span>
-                                          </div>
                                         )}
                                       </div>
                                     </div>
 
-                                    {canEditCurrentTour && (
-                                      <div className="flex items-center justify-between mt-3 pt-2 border-t border-slate-800/50">
+                                    {/* Score */}
+                                    <div className="flex flex-col items-center gap-0.5 mx-3 px-3 py-1 bg-slate-950 rounded-xl border border-slate-850 flex-shrink-0">
+                                      {match.played ? (
+                                        <div className="flex flex-col items-center gap-0.5">
+                                          <div className="flex items-center gap-2">
+                                            <span className="text-sm md:text-base font-black text-white">{match.scoreA}</span>
+                                            <span className="text-slate-600 font-bold text-xs">-</span>
+                                            <span className="text-sm md:text-base font-black text-white">{match.scoreB}</span>
+                                          </div>
+                                          {match.scoreA === match.scoreB && match.penaltiesA !== null && match.penaltiesB !== null && (
+                                            <span className="text-[9px] text-amber-400 font-medium tracking-tight">
+                                              ({match.penaltiesA} - {match.penaltiesB} Pen)
+                                            </span>
+                                          )}
+                                        </div>
+                                      ) : (
+                                        <span className="text-[9px] font-black text-slate-500 uppercase tracking-wider">VS</span>
+                                      )}
+                                    </div>
+
+                                    {/* Team B */}
+                                    <div className="flex items-center gap-2.5 flex-1 justify-end min-w-0 text-right">
+                                      <div className="min-w-0">
+                                        <span className={`text-xs md:text-sm font-black truncate block ${
+                                          match.played && (match.scoreB ?? 0) > (match.scoreA ?? 0) ? 'text-white' : 'text-slate-300'
+                                        }`}>
+                                          {teamB ? teamB.name : (sourceInfoB ? sourceInfoB.label : 'Por clasificar')}
+                                        </span>
+                                        {sourceInfoB && (
+                                          <span className="text-[9px] text-slate-500 block truncate">
+                                            {sourceInfoB.label} {sourceInfoB.stats ? `(${sourceInfoB.stats})` : ''}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {teamB ? renderTeamBadge(teamB, 'w-8 h-8 md:w-9 md:h-9') : (
+                                        <div className="w-8 h-8 md:w-9 md:h-9 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center flex-shrink-0">
+                                          <span className="text-[9px] font-bold text-slate-500">TBD</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Admin Actions */}
+                                  {canEditCurrentTour && (
+                                    <div className="flex items-center justify-between mt-3 pt-2 border-t border-slate-800/50">
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          showConfirm(
+                                            '¿Eliminar Llave?',
+                                            '¿Está seguro de querer eliminar este enfrentamiento permanentemente?',
+                                            () => {
+                                              const updatedMatches = matches.filter(m => m.id !== match.id);
+                                              saveState(teams, tournaments, updatedMatches);
+                                            }
+                                          );
+                                        }}
+                                        className="text-[10px] font-bold text-red-400 hover:text-red-300 transition cursor-pointer"
+                                      >
+                                        Eliminar Llave
+                                      </button>
+
+                                      <div className="flex items-center gap-1.5">
                                         <button
                                           type="button"
                                           onClick={(e) => {
                                             e.stopPropagation();
-                                            showConfirm(
-                                              '¿Eliminar Llave?',
-                                              '¿Está seguro de querer eliminar este enfrentamiento permanentemente?',
-                                              () => {
-                                                const updatedMatches = matches.filter(m => m.id !== match.id);
-                                                saveState(teams, tournaments, updatedMatches);
-                                              }
-                                            );
+                                            handleOpenScoreModal(match);
                                           }}
-                                          className="text-[10px] font-bold text-red-400 hover:text-red-300 transition"
+                                          className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 px-2.5 py-1 bg-emerald-950/40 border border-emerald-900/30 rounded-lg transition flex items-center gap-1 cursor-pointer"
                                         >
-                                          Eliminar Enfrentamiento
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 transition flex items-center gap-1"
-                                        >
-                                          <Edit2 className="w-3 h-3" /> Editar Marcador
+                                          <Edit2 className="w-3 h-3" />
+                                          <span>{match.played ? 'Editar Marcador' : 'Anotar Resultado'}</span>
                                         </button>
                                       </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -5079,7 +5747,424 @@ export default function App() {
         </div>
       )}
 
-      {/* --- MODAL: ADD MANUAL LLAVE --- */}
+      {/* --- MODAL: CUSTOM BRACKET BUILDER (CREADOR DE LLAVES PERSONALIZADAS) --- */}
+      {showBracketBuilderModal && currentTour && (
+        <div className="fixed inset-0 z-[120] bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-3xl max-h-[90vh] flex flex-col relative overflow-hidden shadow-2xl my-auto">
+            <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-emerald-500 via-teal-400 to-green-500" />
+
+            {/* Header */}
+            <div className="p-5 sm:p-6 border-b border-slate-800 flex-shrink-0">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-950/80 border border-emerald-800/60 flex items-center justify-center text-emerald-400 flex-shrink-0 shadow-inner">
+                    <Wand2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base sm:text-lg font-black text-white uppercase tracking-wider">
+                      Armar y Personalizar Cruces de Llaves
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Torneo: <span className="text-slate-200 font-bold">{currentTour.name}</span>
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowBracketBuilderModal(false)}
+                  className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center text-sm transition cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Scrollable Content */}
+            <div className="p-5 sm:p-6 space-y-6 overflow-y-auto flex-1">
+              {/* Phase name selection */}
+              <div>
+                <label className="block text-xs font-bold text-slate-300 mb-1.5 uppercase tracking-wider">
+                  Nombre de la Fase
+                </label>
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  {['Octavos de Final', 'Final Directa', 'Segunda Fase', 'Cuartos de Final', 'Semifinales'].map(p => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => handleSelectPhaseNameQuick(p)}
+                      className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition cursor-pointer flex items-center gap-1.5 ${
+                        bracketBuilderPhaseName === p
+                          ? 'bg-emerald-600 text-white border-emerald-500 shadow-md shadow-emerald-950 ring-1 ring-emerald-400/50'
+                          : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:border-slate-700'
+                      }`}
+                    >
+                      {p === 'Octavos de Final' && '🏆'}
+                      {p === 'Final Directa' && '🥇'}
+                      {p === 'Segunda Fase' && '⚔️'}
+                      {p === 'Cuartos de Final' && '🏅'}
+                      {p === 'Semifinales' && '🎖️'}
+                      <span>{p}</span>
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej: Octavos de Final, Final Directa, Segunda Fase, Liguilla Final..."
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 rounded-xl focus:border-emerald-500 text-slate-200 text-sm focus:outline-none"
+                  value={bracketBuilderPhaseName}
+                  onChange={(e) => setBracketBuilderPhaseName(e.target.value)}
+                />
+              </div>
+
+              {/* Preset Template Selector */}
+              {(() => {
+                const allTemplates = getBracketTemplates(currentTour);
+                if (allTemplates.length === 0) return null;
+
+                const filteredTemplates = bracketTemplateCategoryFilter === 'ALL'
+                  ? allTemplates
+                  : allTemplates.filter(t => t.category === bracketTemplateCategoryFilter);
+
+                const categoryButtons: { key: string; label: string; icon: string }[] = [
+                  { key: 'ALL', label: 'Todas', icon: '✨' },
+                  { key: 'OCTAVOS', label: 'Octavos', icon: '🏆' },
+                  { key: 'FINAL_DIRECTA', label: 'Final Directa', icon: '🥇' },
+                  { key: 'SEGUNDA_FASE', label: 'Segunda Fase', icon: '⚔️' },
+                  { key: 'CUARTOS', label: 'Cuartos', icon: '🏅' },
+                  { key: 'SEMIS', label: 'Semifinales', icon: '🎖️' }
+                ];
+
+                return (
+                  <div className="bg-slate-950/70 border border-slate-800/90 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-inner">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 text-xs font-extrabold text-emerald-400 uppercase tracking-wide">
+                        <Sparkles className="w-4 h-4 text-emerald-400 animate-pulse" />
+                        <span>Cargar Plantilla de Cruces Predefinida</span>
+                      </div>
+                      <span className="text-[11px] text-slate-400">
+                        Selecciona una plantilla para actualizar automáticamente los cruces de abajo
+                      </span>
+                    </div>
+
+                    {/* Category Filter Tabs */}
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-850">
+                      {categoryButtons.map(cat => {
+                        const count = cat.key === 'ALL'
+                          ? allTemplates.length
+                          : allTemplates.filter(t => t.category === cat.key).length;
+                        
+                        if (count === 0 && cat.key !== 'ALL') return null;
+
+                        const isSelected = bracketTemplateCategoryFilter === cat.key;
+                        return (
+                          <button
+                            key={cat.key}
+                            type="button"
+                            onClick={() => setBracketTemplateCategoryFilter(cat.key)}
+                            className={`px-3 py-1 text-xs font-bold rounded-lg border transition cursor-pointer flex items-center gap-1.5 ${
+                              isSelected
+                                ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60 shadow-sm'
+                                : 'bg-slate-900/80 text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-850'
+                            }`}
+                          >
+                            <span>{cat.icon}</span>
+                            <span>{cat.label}</span>
+                            <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                              isSelected ? 'bg-emerald-500 text-slate-950 font-black' : 'bg-slate-800 text-slate-400'
+                            }`}>
+                              {count}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Template Cards Grid */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-60 overflow-y-auto pr-1">
+                      {filteredTemplates.map(tmpl => {
+                        const isCurrentSelected = bracketBuilderSelectedTemplate === tmpl.id;
+                        return (
+                          <button
+                            key={tmpl.id}
+                            type="button"
+                            onClick={() => handleApplyBracketTemplate(tmpl.id)}
+                            className={`p-3 rounded-xl text-left transition cursor-pointer flex flex-col justify-between gap-1.5 border relative group ${
+                              isCurrentSelected
+                                ? 'bg-emerald-950/40 border-emerald-500 shadow-md shadow-emerald-950/50 ring-1 ring-emerald-500/30'
+                                : 'bg-slate-900/90 hover:bg-slate-850 border-slate-800 hover:border-emerald-500/40'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <span className={`text-xs font-bold transition flex items-center gap-1.5 ${
+                                isCurrentSelected ? 'text-emerald-300' : 'text-slate-200 group-hover:text-emerald-400'
+                              }`}>
+                                {isCurrentSelected && <Check className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />}
+                                <span>{tmpl.name}</span>
+                              </span>
+                              <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-slate-950 border border-slate-800 text-slate-400 flex-shrink-0">
+                                {tmpl.rules.length} {tmpl.rules.length === 1 ? 'Llave' : 'Llaves'}
+                              </span>
+                            </div>
+                            <span className="text-[10px] text-slate-400 leading-snug line-clamp-2">
+                              {tmpl.description}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Cruces List Editor */}
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-950/40 p-3 rounded-2xl border border-slate-850">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-black text-slate-200 uppercase tracking-wider">
+                        Cruces / Enfrentamientos ({bracketBuilderRules.length} {bracketBuilderRules.length === 1 ? 'partido' : 'partidos'})
+                      </span>
+                      <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-950 border border-emerald-800 text-emerald-400">
+                        {bracketBuilderPhaseName}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Los cruces se actualizan según la plantilla seleccionada o puedes editarlos y personalizarlos libremente
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const newIdx = bracketBuilderRules.length + 1;
+                      setBracketBuilderRules(prev => [
+                        ...prev,
+                        {
+                          id: `rule-${Date.now()}-${newIdx}`,
+                          sourceA: 'TBD',
+                          sourceB: 'TBD',
+                          customLabel: `Llave ${newIdx}`
+                        }
+                      ]);
+                    }}
+                    className="px-3.5 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer self-start sm:self-auto"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Agregar Cruce Manual</span>
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  {(() => {
+                    const availableSources = getAvailableBracketSources(currentTour);
+                    // Group sources by their group category for clean optgroups
+                    const groupedSources = availableSources.reduce((acc, s) => {
+                      if (!acc[s.group]) acc[s.group] = [];
+                      acc[s.group].push(s);
+                      return acc;
+                    }, {} as Record<string, typeof availableSources>);
+
+                    return bracketBuilderRules.map((rule, idx) => {
+                      const resA = resolveBracketSource(currentTour.id, rule.sourceA);
+                      const resB = resolveBracketSource(currentTour.id, rule.sourceB);
+
+                      return (
+                        <div
+                          key={rule.id || idx}
+                          className="p-4 bg-slate-950 rounded-2xl border border-slate-850 space-y-3 hover:border-slate-800 transition shadow-sm"
+                        >
+                          {/* Cruce header bar */}
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-850/80 pb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest bg-emerald-950/80 border border-emerald-900/50 px-2.5 py-0.5 rounded-md">
+                                Cruce #{idx + 1}
+                              </span>
+                              <input
+                                type="text"
+                                placeholder={`Ej: 1ro Grupo A vs 4to Grupo C`}
+                                className="px-2.5 py-1 bg-slate-900 border border-slate-800 rounded-lg text-slate-200 text-xs focus:border-emerald-500 focus:outline-none w-48 sm:w-72 font-medium"
+                                value={rule.customLabel || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setBracketBuilderRules(prev =>
+                                    prev.map((r, i) => i === idx ? { ...r, customLabel: val } : r)
+                                  );
+                                }}
+                              />
+                            </div>
+
+                            {bracketBuilderRules.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setBracketBuilderRules(prev => prev.filter((_, i) => i !== idx));
+                                }}
+                                className="text-slate-500 hover:text-red-400 text-xs p-1.5 rounded-lg hover:bg-slate-900 transition cursor-pointer flex items-center gap-1"
+                                title="Eliminar este cruce"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span className="text-[10px]">Quitar</span>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Team Selection Grid */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {/* Team A Slot */}
+                            <div className="p-3 bg-slate-900/90 rounded-xl border border-slate-800/80 space-y-2">
+                              <label className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                                Posición / Equipo Local (A)
+                              </label>
+                              <select
+                                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-200 text-xs focus:border-emerald-500 focus:outline-none"
+                                value={rule.sourceA}
+                                onChange={(e) => {
+                                  const newSourceA = e.target.value;
+                                  setBracketBuilderRules(prev =>
+                                    prev.map((r, i) => {
+                                      if (i !== idx) return r;
+                                      const labelA = availableSources.find(s => s.value === newSourceA)?.label || newSourceA;
+                                      const labelB = availableSources.find(s => s.value === r.sourceB)?.label || r.sourceB;
+                                      return {
+                                        ...r,
+                                        sourceA: newSourceA,
+                                        customLabel: `${labelA} VS ${labelB}`
+                                      };
+                                    })
+                                  );
+                                }}
+                              >
+                                {Object.entries(groupedSources).map(([grp, items]) => (
+                                  <optgroup key={grp} label={grp} className="bg-slate-900 text-slate-300 font-bold">
+                                    {items.map(item => (
+                                      <option key={item.value} value={item.value} className="text-white">
+                                        {item.label}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                ))}
+                              </select>
+
+                              {/* Dynamic Resolved Badge Preview */}
+                              <div className="flex items-center gap-2 pt-1 bg-slate-950/60 p-2 rounded-lg border border-slate-850">
+                                {resA.team ? renderTeamBadge(resA.team, 'w-6 h-6') : (
+                                  <div className="w-6 h-6 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center flex-shrink-0">
+                                    <span className="text-[8px] font-bold text-slate-500">?</span>
+                                  </div>
+                                )}
+                                <div className="min-w-0 flex-1">
+                                  <span className={`text-xs font-bold block truncate ${resA.team ? 'text-white' : 'text-slate-400'}`}>
+                                    {resA.team ? resA.team.name : resA.label}
+                                  </span>
+                                  {resA.stats && (
+                                    <span className="text-[9px] text-emerald-400 block font-medium">
+                                      {resA.stats}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Team B Slot */}
+                            <div className="p-3 bg-slate-900/90 rounded-xl border border-slate-800/80 space-y-2">
+                              <label className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                                Posición / Equipo Visitante (B)
+                              </label>
+                              <select
+                                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-200 text-xs focus:border-emerald-500 focus:outline-none"
+                                value={rule.sourceB}
+                                onChange={(e) => {
+                                  const newSourceB = e.target.value;
+                                  setBracketBuilderRules(prev =>
+                                    prev.map((r, i) => {
+                                      if (i !== idx) return r;
+                                      const labelA = availableSources.find(s => s.value === r.sourceA)?.label || r.sourceA;
+                                      const labelB = availableSources.find(s => s.value === newSourceB)?.label || newSourceB;
+                                      return {
+                                        ...r,
+                                        sourceB: newSourceB,
+                                        customLabel: `${labelA} VS ${labelB}`
+                                      };
+                                    })
+                                  );
+                                }}
+                              >
+                                {Object.entries(groupedSources).map(([grp, items]) => (
+                                  <optgroup key={grp} label={grp} className="bg-slate-900 text-slate-300 font-bold">
+                                    {items.map(item => (
+                                      <option key={item.value} value={item.value} className="text-white">
+                                        {item.label}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                ))}
+                              </select>
+
+                              {/* Dynamic Resolved Badge Preview */}
+                              <div className="flex items-center gap-2 pt-1 bg-slate-950/60 p-2 rounded-lg border border-slate-850">
+                                {resB.team ? renderTeamBadge(resB.team, 'w-6 h-6') : (
+                                  <div className="w-6 h-6 rounded-full border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center flex-shrink-0">
+                                    <span className="text-[8px] font-bold text-slate-500">?</span>
+                                  </div>
+                                )}
+                                <div className="min-w-0 flex-1">
+                                  <span className={`text-xs font-bold block truncate ${resB.team ? 'text-white' : 'text-slate-400'}`}>
+                                    {resB.team ? resB.team.name : resB.label}
+                                  </span>
+                                  {resB.stats && (
+                                    <span className="text-[9px] text-emerald-400 block font-medium">
+                                      {resB.stats}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              </div>
+
+              {/* Replace existing checkbox */}
+              <div className="bg-slate-950/60 p-3.5 rounded-2xl border border-slate-800 flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  id="replaceExisting"
+                  checked={bracketBuilderReplaceExisting}
+                  onChange={(e) => setBracketBuilderReplaceExisting(e.target.checked)}
+                  className="w-4 h-4 rounded text-emerald-600 bg-slate-900 border-slate-700 focus:ring-emerald-500"
+                />
+                <label htmlFor="replaceExisting" className="text-xs text-slate-300 cursor-pointer font-medium">
+                  Reemplazar llaves existentes en la fase <strong className="text-white">"{bracketBuilderPhaseName}"</strong> si ya existen
+                </label>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 sm:p-5 border-t border-slate-800 bg-slate-950/80 flex items-center justify-between gap-3 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowBracketBuilderModal(false)}
+                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-xl transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSaveCustomBracketMatches}
+                className="px-6 py-2.5 bg-gradient-to-r from-emerald-600 to-green-500 hover:from-emerald-500 hover:to-green-400 text-white text-xs font-black rounded-xl transition cursor-pointer shadow-lg shadow-emerald-950 flex items-center gap-2"
+              >
+                <Trophy className="w-4 h-4" />
+                <span>🏆 Generar y Guardar Llaves ({bracketBuilderRules.length})</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showAddManualLlaveModal && currentTour && (
         <div className="fixed inset-0 z-[110] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md p-6 relative overflow-hidden shadow-2xl">

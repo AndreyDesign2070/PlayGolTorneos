@@ -15,6 +15,11 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
   const DATA_FILE = path.join(process.cwd(), "data.json");
+  const UPLOAD_DIR = path.join(process.cwd(), "uploads");
+
+  if (!fs.existsSync(UPLOAD_DIR)) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  }
 
   // Middlewares
   app.use((req, res, next) => {
@@ -28,6 +33,7 @@ async function startServer() {
   });
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  app.use("/uploads", express.static(UPLOAD_DIR));
 
   // Helper to read state
   const readState = () => {
@@ -282,6 +288,22 @@ async function startServer() {
   app.get("/api/state", (req, res) => {
     const state = readState();
     res.json(state);
+  });
+
+  // Image upload endpoint for persistent shields and tournament logos
+  app.post("/api/upload-image", (req, res) => {
+    try {
+      const { image } = req.body;
+      if (!image || typeof image !== "string") {
+        return res.status(400).json({ error: "Missing image data" });
+      }
+
+      // Return the base64 data url directly so it can be stored permanently in Firestore/state
+      return res.json({ success: true, url: image });
+    } catch (err: any) {
+      console.error("Error saving uploaded image:", err);
+      return res.status(500).json({ error: "Failed to save image" });
+    }
   });
 
   // 3. Write and broadcast full state
