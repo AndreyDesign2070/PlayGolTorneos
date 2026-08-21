@@ -932,6 +932,46 @@ export default function App() {
     return updatedMatches;
   };
 
+  // --- SERIALIZED & THROTTLED FIRESTORE WRITE STREAM MANAGER ---
+  const pendingFirestorePayloadRef = useRef<any>(null);
+  const isFirestoreSavingRef = useRef<boolean>(false);
+  const firestoreDebounceTimerRef = useRef<any>(null);
+
+  const executeQueuedFirestoreSave = async () => {
+    if (isFirestoreSavingRef.current || !pendingFirestorePayloadRef.current) {
+      return;
+    }
+    const payloadToSave = pendingFirestorePayloadRef.current;
+    pendingFirestorePayloadRef.current = null;
+    isFirestoreSavingRef.current = true;
+
+    try {
+      await setDoc(doc(db, 'app_state', 'main'), payloadToSave, { merge: true });
+    } catch (err: any) {
+      console.warn("Firestore queued write notice:", err?.message || err);
+      // If temporary backend backoff/throttle occurs, keep payload to retry safely
+      if (!pendingFirestorePayloadRef.current) {
+        pendingFirestorePayloadRef.current = payloadToSave;
+      }
+    } finally {
+      isFirestoreSavingRef.current = false;
+      // If further state changes accumulated while save was in progress, execute next sync
+      if (pendingFirestorePayloadRef.current) {
+        setTimeout(executeQueuedFirestoreSave, 350);
+      }
+    }
+  };
+
+  const queueFirestoreSave = (payload: any) => {
+    pendingFirestorePayloadRef.current = payload;
+    if (firestoreDebounceTimerRef.current) {
+      clearTimeout(firestoreDebounceTimerRef.current);
+    }
+    firestoreDebounceTimerRef.current = setTimeout(() => {
+      executeQueuedFirestoreSave();
+    }, 250);
+  };
+
   // --- SAVE PERSISTENCE & REAL-TIME 1:1 CLOUD BROADCAST ---
   const saveState = async (
     updatedTeams: Team[], 
@@ -1004,54 +1044,15 @@ export default function App() {
       console.warn("Could not post state to cloud:", err);
     }
 
-    // 3. Guaranteed Master State Cloud Persistence in Firestore
-    try {
-      await setDoc(doc(db, 'app_state', 'main'), {
-        teams: cleanTeams,
-        tournaments: cleanTournaments,
-        matches: cleanMatches,
-        notifications: updatedNotifs,
-        lastNotification: createdNotif || null,
-        updatedAt: Date.now()
-      });
-    } catch (err) {
-      console.warn("Firestore master state sync warning:", err);
-    }
-
-    // 4. Parallel background sync to individual Firestore collections
-    try {
-      const batchTeams = writeBatch(db);
-      cleanTeams.forEach(t => {
-        batchTeams.set(doc(db, 'teams', t.id), t);
-      });
-
-      const batchTours = writeBatch(db);
-      cleanTournaments.forEach(t => {
-        batchTours.set(doc(db, 'tournaments', t.id), t);
-      });
-
-      const matchBatchPromises = [];
-      for (let i = 0; i < cleanMatches.length; i += 400) {
-        const chunk = cleanMatches.slice(i, i + 400);
-        const matchBatch = writeBatch(db);
-        chunk.forEach(m => {
-          matchBatch.set(doc(db, 'matches', m.id), m);
-        });
-        matchBatchPromises.push(matchBatch.commit());
-      }
-
-      if (createdNotif) {
-        setDoc(doc(db, 'notifications', createdNotif.id), createdNotif).catch(() => {});
-      }
-
-      Promise.all([
-        batchTeams.commit(),
-        batchTours.commit(),
-        ...matchBatchPromises
-      ]).catch(() => {});
-    } catch (err) {
-      console.warn("Firestore sync background warning:", err);
-    }
+    // 3. Guaranteed Master State Cloud Persistence in Firestore via queued single-document stream
+    queueFirestoreSave({
+      teams: cleanTeams,
+      tournaments: cleanTournaments,
+      matches: cleanMatches,
+      notifications: updatedNotifs,
+      lastNotification: createdNotif || null,
+      updatedAt: Date.now()
+    });
   };
 
   const sendNotification = async (text: string, tournamentId?: string) => {
@@ -1080,12 +1081,12 @@ export default function App() {
       console.warn("Error posting notification to cloud:", err);
     }
 
-    // Background Firestore notification write
-    try {
-      setDoc(doc(db, 'notifications', newNotif.id), newNotif).catch(() => {});
-    } catch (err) {
-      console.warn("Error writing notification to Firestore:", err);
-    }
+    // Queue in master state rather than unthrottled raw doc write
+    queueFirestoreSave({
+      notifications: updatedNotifications,
+      lastNotification: newNotif,
+      updatedAt: Date.now()
+    });
   };
 
   const handleClearAllNotifications = async () => {
@@ -1110,16 +1111,12 @@ export default function App() {
         })
       });
     } catch {}
-    try {
-      const snap = await getDocs(collection(db, 'notifications'));
-      const batch = writeBatch(db);
-      snap.forEach(d => {
-        batch.delete(d.ref);
-      });
-      await batch.commit();
-    } catch (err) {
-      console.error("Error clearing notifications in Firestore:", err);
-    }
+    
+    queueFirestoreSave({
+      notifications: [],
+      lastNotification: null,
+      updatedAt: Date.now()
+    });
   };
 
   // --- LOGIN LOGIC ---
