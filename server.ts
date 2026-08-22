@@ -91,46 +91,13 @@ async function startServer() {
 
     mqttClient.on("connect", () => {
       console.log("Server connected to MQTT Cloud Broker");
-      mqttClient?.subscribe([TOPIC_ACTION, TOPIC_SYNC, TOPIC_NOTIF, TOPIC_REQ], { qos: 1 });
-
-      // Publish initial state to retain topic if data.json exists
-      const current = readState();
-      if (current.tournaments.length > 0) {
-        mqttClient?.publish(
-          TOPIC_SYNC,
-          JSON.stringify({
-            teams: current.teams,
-            tournaments: current.tournaments,
-            matches: current.matches,
-            notifications: current.notifications,
-            timestamp: Date.now(),
-            senderId: "server"
-          }),
-          { retain: true, qos: 1 }
-        );
-      }
+      mqttClient?.subscribe([TOPIC_ACTION, TOPIC_SYNC, TOPIC_NOTIF], { qos: 1 });
     });
 
     mqttClient.on("message", (topic, msg) => {
       try {
         const payload = JSON.parse(msg.toString());
-        if (topic === TOPIC_REQ && payload && payload.type === "REQUEST_SYNC") {
-          const current = readState();
-          if (current.tournaments.length > 0) {
-            mqttClient?.publish(
-              TOPIC_SYNC,
-              JSON.stringify({
-                teams: current.teams,
-                tournaments: current.tournaments,
-                matches: current.matches,
-                notifications: current.notifications,
-                timestamp: Date.now(),
-                senderId: "server"
-              }),
-              { retain: false, qos: 1 }
-            );
-          }
-        } else if (topic === TOPIC_ACTION && payload && payload.action) {
+        if (topic === TOPIC_ACTION && payload && payload.action) {
           const action = payload.action;
           const current = readState();
           let modified = false;
@@ -332,7 +299,7 @@ async function startServer() {
             timestamp: Date.now(),
             senderId: "server"
           }),
-          { retain: true, qos: 1 }
+          { retain: false, qos: 1 }
         );
       }
 
@@ -364,7 +331,7 @@ async function startServer() {
           timestamp: Date.now(),
           senderId: "server"
         }),
-        { retain: true, qos: 1 }
+        { retain: false, qos: 1 }
       );
       mqttClient.publish(TOPIC_NOTIF, JSON.stringify(notification), { qos: 1 });
     }

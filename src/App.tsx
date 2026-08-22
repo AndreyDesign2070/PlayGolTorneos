@@ -459,11 +459,20 @@ export default function App() {
   const tourFileInputRef = useRef<HTMLInputElement>(null);
   const editTourFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Monotonic timestamp tracker to prevent older/stale cache or peer syncs from overwriting newer state
+  const lastStateTimestampRef = useRef<number>(() => {
+    try {
+      const s = localStorage.getItem('playgol_last_updated');
+      return s ? Number(s) : 0;
+    } catch {
+      return 0;
+    }
+  });
+
   // --- INITIAL SEED DATA & REAL-TIME 1:1 SYNC ENGINE ---
   useEffect(() => {
     let isMounted = true;
     let eventSource: EventSource | null = null;
-    let pollInterval: any = null;
 
     // 1. Listen to Auth State changes in Firebase Auth (optional background sync)
     const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
@@ -483,47 +492,94 @@ export default function App() {
       signInAnonymously(auth).catch(() => {});
     }
 
-    // Unified function to apply incoming cloud updates to local state and trigger notifications
-    const applyIncomingState = (incoming: any, specificNotification?: any) => {
+    // Unified function to apply incoming cloud updates to local state safely without data loss
+    const applyIncomingState = (incoming: any, specificNotification?: any, source?: string) => {
       if (!incoming || !isMounted) return;
+
+      const incomingTimestamp = Number(incoming.updatedAt || incoming.timestamp || 0);
+
+      // If incoming payload is older than what we already know from a recent write/sync, ignore older peer state
+      if (source !== 'firestore' && incomingTimestamp > 0 && lastStateTimestampRef.current > 0) {
+        if (incomingTimestamp < lastStateTimestampRef.current - 1500) {
+          return;
+        }
+      }
+
+      if (incomingTimestamp > 0) {
+        lastStateTimestampRef.current = Math.max(lastStateTimestampRef.current, incomingTimestamp);
+        try {
+          localStorage.setItem('playgol_last_updated', String(lastStateTimestampRef.current));
+        } catch {}
+      }
 
       if (Array.isArray(incoming.tournaments)) {
         setTournaments(prevTours => {
-          const mergedTours = incoming.tournaments.map((inTour: any) => {
-            const existing = prevTours.find(t => t.id === inTour.id);
-            // If local state already had a custom logoUrl and incoming has empty/undefined, preserve it!
-            if (existing && existing.logoUrl && !inTour.logoUrl) {
-              return { ...inTour, logoUrl: existing.logoUrl };
-            }
-            return inTour;
-          });
+          let mergedTours: Tournament[];
+          if (source === 'firestore') {
+            mergedTours = incoming.tournaments;
+          } else {
+            // Non-destructive merge: preserve user-created tournaments
+            const map = new Map<string, Tournament>(prevTours.map(t => [t.id, t]));
+            incoming.tournaments.forEach((inTour: Tournament) => {
+              const existing = map.get(inTour.id);
+              if (existing && existing.logoUrl && !inTour.logoUrl) {
+                map.set(inTour.id, { ...existing, ...inTour, logoUrl: existing.logoUrl });
+              } else {
+                map.set(inTour.id, { ...(existing || {} as Tournament), ...inTour });
+              }
+            });
+            mergedTours = Array.from(map.values());
+          }
           try {
             localStorage.setItem('playgol_tournaments_cache', JSON.stringify(mergedTours));
           } catch {}
           return mergedTours;
         });
       }
+
       if (Array.isArray(incoming.teams)) {
         setTeams(prevTeams => {
-          const mergedTeams = incoming.teams.map((inTeam: any) => {
-            const existing = prevTeams.find(t => t.id === inTeam.id);
-            // If local state already had a custom logoUrl and incoming has empty/undefined, preserve it!
-            if (existing && existing.logoUrl && !inTeam.logoUrl) {
-              return { ...inTeam, logoUrl: existing.logoUrl };
-            }
-            return inTeam;
-          });
+          let mergedTeams: Team[];
+          if (source === 'firestore') {
+            mergedTeams = incoming.teams;
+          } else {
+            // Non-destructive merge: preserve user-created clubs
+            const map = new Map<string, Team>(prevTeams.map(t => [t.id, t]));
+            incoming.teams.forEach((inTeam: Team) => {
+              const existing = map.get(inTeam.id);
+              if (existing && existing.logoUrl && !inTeam.logoUrl) {
+                map.set(inTeam.id, { ...existing, ...inTeam, logoUrl: existing.logoUrl });
+              } else {
+                map.set(inTeam.id, { ...(existing || {} as Team), ...inTeam });
+              }
+            });
+            mergedTeams = Array.from(map.values());
+          }
           try {
             localStorage.setItem('playgol_teams_cache', JSON.stringify(mergedTeams));
           } catch {}
           return mergedTeams;
         });
       }
+
       if (Array.isArray(incoming.matches)) {
-        setMatches(incoming.matches);
-        try {
-          localStorage.setItem('playgol_matches_cache', JSON.stringify(incoming.matches));
-        } catch {}
+        setMatches(prevMatches => {
+          let mergedMatches: Match[];
+          if (source === 'firestore') {
+            mergedMatches = incoming.matches;
+          } else {
+            // Non-destructive merge: preserve updated match scores
+            const map = new Map<string, Match>(prevMatches.map(m => [m.id, m]));
+            incoming.matches.forEach((inMatch: Match) => {
+              map.set(inMatch.id, inMatch);
+            });
+            mergedMatches = Array.from(map.values());
+          }
+          try {
+            localStorage.setItem('playgol_matches_cache', JSON.stringify(mergedMatches));
+          } catch {}
+          return mergedMatches;
+        });
       }
 
       if (Array.isArray(incoming.notifications)) {
@@ -570,12 +626,13 @@ export default function App() {
               teams: data.teams || [],
               tournaments: data.tournaments || [],
               matches: data.matches || [],
-              notifications: data.notifications || []
-            }, data.lastNotification);
+              notifications: data.notifications || [],
+              updatedAt: data.updatedAt || Date.now()
+            }, data.lastNotification, 'firestore');
           }
         } else if (!hasInitializedFirestoreSeed) {
           hasInitializedFirestoreSeed = true;
-          // Seed Firestore with initial state on first initialization
+          // Seed Firestore with initial state ONLY on brand new unseeded database
           const seedPayload = {
             teams: cleanForFirestore(teams),
             tournaments: cleanForFirestore(tournaments),
@@ -596,6 +653,11 @@ export default function App() {
     // 2. Realtime Action Listener (Sub-15ms direct action delta updates)
     const unsubRealtimeAction = realtimeSync.subscribeAction((action: RealtimeAction) => {
       if (!isMounted || !action) return;
+
+      lastStateTimestampRef.current = Date.now();
+      try {
+        localStorage.setItem('playgol_last_updated', String(lastStateTimestampRef.current));
+      } catch {}
 
       if (action.type === 'REQUEST_SYNC') {
         setTournaments(currTours => {
@@ -734,7 +796,7 @@ export default function App() {
     // 3. Realtime MQTT listener (Instant sub-100ms real-time 1:1 cross-device sync)
     const unsubRealtimeState = realtimeSync.subscribeState((payload: SyncPayload) => {
       if (isMounted && payload) {
-        applyIncomingState(payload, payload.notification);
+        applyIncomingState(payload, payload.notification, 'mqtt');
       }
     });
 
@@ -745,26 +807,7 @@ export default function App() {
       }
     });
 
-    // 4. Initial State Fetch from Cloud Backend
-    const fetchLatestState = async () => {
-      try {
-        const res = await fetch(getApiUrl('/api/state'), { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          if (data && (Array.isArray(data.tournaments) || Array.isArray(data.teams))) {
-            applyIncomingState(data);
-          }
-        }
-      } catch (err) {
-        console.warn("Could not fetch state from cloud:", err);
-      } finally {
-        if (isMounted) setIsLoading(false);
-      }
-    };
-
-    fetchLatestState();
-
-    // 5. Real-time Server-Sent Events (SSE) stream for dual backup sync
+    // 4. Real-time Server-Sent Events (SSE) stream for dual backup sync
     const connectSSE = () => {
       if (typeof EventSource === 'undefined') return;
       try {
@@ -775,7 +818,7 @@ export default function App() {
           try {
             const payload = JSON.parse(event.data);
             if (payload && payload.state) {
-              applyIncomingState(payload.state, payload.notification);
+              applyIncomingState(payload.state, payload.notification, 'sse');
             }
           } catch (e) {}
         };
@@ -786,22 +829,15 @@ export default function App() {
             eventSource = null;
           }
           if (isMounted) {
-            setTimeout(connectSSE, 4000);
+            setTimeout(connectSSE, 5000);
           }
         };
       } catch (e) {
-        console.warn("SSE connection error:", e);
+        console.warn("SSE connection notice:", e);
       }
     };
 
     connectSSE();
-
-    // 6. Fallback background polling every 3 seconds
-    pollInterval = setInterval(() => {
-      if (isMounted) {
-        fetchLatestState();
-      }
-    }, 3000);
 
     return () => {
       isMounted = false;
@@ -812,9 +848,6 @@ export default function App() {
       unsubRealtimeNotif();
       if (eventSource) {
         eventSource.close();
-      }
-      if (pollInterval) {
-        clearInterval(pollInterval);
       }
     };
   }, []);
@@ -990,6 +1023,12 @@ export default function App() {
     const cleanTeams = cleanForFirestore(updatedTeams) as Team[];
     const cleanTournaments = cleanForFirestore(updatedTournaments) as Tournament[];
     const cleanMatches = cleanForFirestore(processedMatches) as Match[];
+
+    const now = Date.now();
+    lastStateTimestampRef.current = now;
+    try {
+      localStorage.setItem('playgol_last_updated', String(now));
+    } catch {}
 
     // Snappy UI state updates locally
     setTeams(cleanTeams);
